@@ -113,7 +113,7 @@ void onWSMessage(WebsocketsMessage message) {
   LOG3("WS message", message.isBinary(), message.length());
   int length = message.length();
   if (message.isBinary() && length < MAX_CMD_LENGTH) {
-    uint8_t* data = (uint8_t*) message.data().data();
+    uint8_t* data = (uint8_t*) message.c_str();
     #if WANT_LOGGING == 1
       LOG_NLN("M2 <-");
       for (int i = 0; i < length; i++) {
