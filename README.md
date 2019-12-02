@@ -1,4 +1,4 @@
-# Onyx M2/SuperB Firmware
+# Tesla Onyx M2/SuperB Firmware
 
 This project has 2 flashable Arduino firmwares for a Macchina M2 and SuperB device that implements a CANBUS access system for Tesla Model 3s. See details on the hardware here:
    - https://docs.macchina.cc/m2-docs/m2
@@ -11,7 +11,9 @@ NOTE: This documentation is a work in progress, and by this I mean it sucks and 
 
 ## Flashing
 
-The device must be flashed in 2 steps (because it is in fact 2 separate devices connected through the Xbee socket).
+The device must be flashed in 2 steps (because it is in fact 2 separate devices connected through the Xbee socket). Step zero is to install the Arduino libraries required, using the library manager.  Currently these are:
+  - ArduinoWebsockets
+  - PacketSerial
 
 ### Flashing the M2
 
