@@ -35,7 +35,7 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 
 4. Flash the SuperB sketch [onyx-superb.ino](onyx-superb/onyx-superb.ino) to the device.
 
-5. The device will *not* cycle on its own, you need to power down the M2 by pulling the USB cable and reconnecting.
+5. The device will *not* cycle on its own, you need to power down the M2 by pulling the USB cable a::nd reconnecting.
 
 ## Debugging
 
@@ -44,3 +44,37 @@ If all went well (it won't have), the M2 should connect to the server immediatly
 To obtain logs, either firmware can be configured with `WANT_LOGGING` (but not both at the same time!). I suggest you start with the SuperB. Any connection issues should be logged to the serial monitor using the SuperB Arduino setup in this mode.
 
 If the connection works, the M2 can be setup to log also, but note that the M2 will not run properly while the SuperB is logging.
+
+## Operations
+
+### Main Status LED
+
+The firmware uses the externally visible LED (`DS7`) to indicate active operational status (as indicated
+by activity within the last second).
+
+The LED that is visible outside of the enclosure is the main status indicator. When
+first powered on, the LED will flash `RED` indicating the version number of the firmware.
+
+The LED will settle on solid `RED` after initialization, and indicates an idle status.
+As soon as CAN traffic is detected, the LED changes to a solid `BLUE`.
+When CAN packets make it through the filter and are sent to the SuperB for transmission to the server, a solid `GREEN` is shown.
+
+### Surface Mount LEDs
+
+These LEDs are not visible if using an opaque enclosure, but can be useful for debugging
+prior to final installation in the enclosure in the car.
+
+Starting from the back of the M2 (nearest to the `BTN1` button, opposite from the USB connector)
+
+- `DS6` is solid `GREEN` if the server's web socket is currently connected
+- `DS5` is solid `YELLOW` if the wifi is up (connected to the access point specified in `config.h`)
+- `DS4` (middle LED) is unused
+- `DS3` and `DS2` are used to indicate the state of the SuperB mode. Pressing any button (`BTN1` or `BTN2`)
+  will enter SuperB mode
+
+### Entering SuperB Mode
+
+Press in either `BTN1` or `BTN2` to enter SuperB mode, which routes all serial port traffic to the
+SuperB directly. This allows programming of the SuperB, or debugging if logging is turned on.
+
+To initiate programming of the SuperB, hold `BTN1` while pressing then releasing `BTN2`.

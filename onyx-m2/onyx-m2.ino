@@ -106,10 +106,10 @@ PacketSerial Mock;
 #define MSGID_UNIX_TIME 1320
 
 // LED colours
-// When powered, the red led is, flashing the verion number at startup.
-// When CAN traffic is detected, the colour changed to blue.
-// When BleLink is connected, the colour becomes green; if BleLink is connected
-// but no CAN traffic, colour is red.
+// When powered, the red led is, flashing the version number at startup.
+// When CAN traffic is detected, the colour changes to blue.
+// When packets are actually sent to the SuperB for transmission to the server,
+// the colour is green.
 #define LED_IDLE RGB_RED
 #define LED_PASSIVE RGB_BLUE
 #define LED_ACTIVE RGB_GREEN
@@ -329,7 +329,7 @@ uint8_t pollTesla(uint32_t now) {
 
       // super annoying bug with unix time being big endian while everything else
       // is little endian; let's not slow down regular processing and just have
-      // explicit copy statments for unix time
+      // explicit copy statements for unix time
       if (id != MSGID_UNIX_TIME) {
         while (length--) {
           *pmsg++ = *data++;
@@ -465,7 +465,7 @@ void runModeLoop() {
   // if the time interval since the last led change has expired, update the led
   // with the current state; if there were any active states during the interval,
   // the active led is show, if not passive states are checked, and if neither
-  // of those occured, the idle led is shown
+  // of those occurred, the idle led is shown
   if (now - lastLedChangeMillis > LEDCFG_CHANGE_PERIOD) {
     if (now - lastActiveMillis < LEDCFG_CHANGE_PERIOD) {
       setStateLedStatus(LED_ACTIVE);
