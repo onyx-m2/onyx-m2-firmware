@@ -1,4 +1,4 @@
-# Tesla Onyx M2/SuperB Firmware
+# Onyx M2/SuperB Firmware
 
 This project has 2 flashable Arduino firmwares for a Macchina M2 and SuperB device that implements a CANBUS access system for Tesla Model 3s. See details on the hardware here:
    - https://docs.macchina.cc/m2-docs/m2
@@ -9,13 +9,13 @@ The firmware was developed in conjunction with
 
 NOTE: This documentation is a work in progress, and by this I mean it sucks and I need to improve it. So, I'm sorry. :)
 
-## Flashing
+# Flashing
 
 The device must be flashed in 2 steps (because it is in fact 2 separate devices connected through the Xbee socket). Step zero is to install the Arduino libraries required, using the library manager.  Currently these are:
   - ArduinoWebsockets
   - PacketSerial
 
-### Flashing the M2
+## Flashing the M2
 
 1. Follow the instructions from Macchina to setup your Arduino environment if that's not done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
 
@@ -23,7 +23,7 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 
 3. The device should restart on its own. At this point, the M2 is in `run` mode, but the SuperB is not operational yet.
 
-### Flashing the SuperB
+## Flashing the SuperB
 
 1. Follow the instructions from Macchina to setup your Arduino environment for the SuperB (see the software section, skip the hardware section, https://docs.macchina.cc/superb-docs/flashing-superb#step-2-software)
 
@@ -37,7 +37,7 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 
 5. The device will *not* cycle on its own, you need to power down the M2 by pulling the USB cable a::nd reconnecting.
 
-## Debugging
+# Debugging
 
 If all went well (it won't have), the M2 should connect to the server immediatly upon being powered up, either on the workbench through the USB cable, or in the car, using the powered CANBUS tap.
 
@@ -45,9 +45,9 @@ To obtain logs, either firmware can be configured with `WANT_LOGGING` (but not b
 
 If the connection works, the M2 can be setup to log also, but note that the M2 will not run properly while the SuperB is logging.
 
-## Operations
+# Operations
 
-### Main Status LED
+## Main Status LED
 
 The firmware uses the externally visible LED (`DS7`) to indicate active operational status (as indicated
 by activity within the last second).
@@ -59,7 +59,7 @@ The LED will settle on solid `RED` after initialization, and indicates an idle s
 As soon as CAN traffic is detected, the LED changes to a solid `BLUE`.
 When CAN packets make it through the filter and are sent to the SuperB for transmission to the server, a solid `GREEN` is shown.
 
-### Surface Mount LEDs
+## Surface Mount LEDs
 
 These LEDs are not visible if using an opaque enclosure, but can be useful for debugging
 prior to final installation in the enclosure in the car.
@@ -72,9 +72,114 @@ Starting from the back of the M2 (nearest to the `BTN1` button, opposite from th
 - `DS3` and `DS2` are used to indicate the state of the SuperB mode. Pressing any button (`BTN1` or `BTN2`)
   will enter SuperB mode
 
-### Entering SuperB Mode
+## Entering SuperB Mode
 
 Press in either `BTN1` or `BTN2` to enter SuperB mode, which routes all serial port traffic to the
 SuperB directly. This allows programming of the SuperB, or debugging if logging is turned on.
 
 To initiate programming of the SuperB, hold `BTN1` while pressing then releasing `BTN2`.
+
+# Message Protocol
+
+All of the above is just the preamble to what really matters, the protocol and what it
+allows to actually do with the M2.
+
+Communication is by directional, the M2 accepting commands that affect the flow of
+message data out of it. The default state has the M2 ignore all messages on the bus
+until it is asked by a client to `ENABLE` some or all messages.
+
+## CAN Messages
+
+The firmware strives to be as efficient and compact as possible in its encoding of
+message, both to reduce latency and bandwidth requirements. Additionally, an effort
+was made to keep each message under 20 bytes to allow each to be send in a single BLE
+(Bluetooth Low Energy) packet.
+
+All messages are binary coded as `timestamp` | `id` | `length` | `data` tuples, where
+  - `timestamp` is `4` bytes, representing a 32 bit little endian encoded milliseconds
+    timestamp, zeroed at device startup
+  - `id` is `2` bytes, representing a 16 bit little endian CAN message id (this
+    corresponds to the message identifiers in dbc files)
+  - `length` is a byte that indicates the number of bytes of message data in the
+    following `data` part
+  - `data` is `0` to `8` bytes of CAN signal data
+
+There is currently rate limiting, on a per message basis, set at 250ms.
+
+## M2 Commands
+
+The firmware contains some basic commands that allow client to tailor the M2 to their
+requirements. This is pretty basic for now, but much more is planned "soon".
+
+The format of commands is simply `command` | `length` | `data`, where
+  - `command` is a byte, indicating what command is being called (see below)
+  - `length` is a byte that indicates the number of bytes of command data in the
+    following `data` part
+  - `data` is `0` to `16` bytes of command data
+
+The current `command` ids are:
+- `0x1` Set all message flags, where `length` is always `1` and `data` is a byte of flag
+  values
+- `0x2` Set a specific message's flags, where `length` is always `3` and `data` is 2
+  bytes for the CAN message id (little endian) followed by a byte of flag values
+- `0x3` Get the latest value of a specific message, which will be returned in a
+  different message, and where `length` is always `2` and `data` is 2
+  bytes for the CAN message id (little endian)
+
+The only flag is `transmit(0x1)`, which indicates whether a message should be transmitted
+if found on the bus. Clearing this flag will effectively _disable_ the message.
+
+# Future Development
+
+Developing this firmware was a lot of fun and a great learning experience, but also
+quite tedious and time consuming. Part of that was me trying to "do it right" and
+"future proof it". Part of it is just the nature of the beast.
+
+The following sections give some details about things I'd like to get to. If you are
+reading this and have other ideas, or want to help implement some of these, please
+open an issue so we can discuss it!
+
+## More Commands
+
+As mentioned above, there are more commands I'd like to add eventually. A few
+possibilities might be:
+  - Setting the rate limiting per message, or at least allowing to be changed
+    remotely
+  - Combining and/or filtering signals from multiple messages into a single packet
+  - Being able to set certain messages as "only send if its data changes" would be
+    super useful for alert type things, or the "sun up" signal
+  - Being able to ask for a message, get its value, but not leave it broadcasting
+    continuously
+
+## Data Logging
+
+From the very beginning of this project, I was planning on using the M2 to log
+everything on the bus to the sd card. This would be great to grab CAN bus data
+easily for study. I was planning on syncing that data with a server when the car
+returns to the garage and the home wifi kicks in.
+
+It would also be possible to make some pretty neat "trip reports" and collate
+historical data on everything. Lots and lots of possibilities with this basic
+feature!
+
+It would be cool to also log superb related data here, including connection
+hickups, latency, bandwidth usage, etc.
+
+## Quality Of Life Improvements
+
+One of the big ones here is having to take the enclosure off to flash the superb. It
+would be great to be able to this through software, possibly by connecting to the usb
+port.
+
+It would also be nice to be able to change the wifi parameters without flashing!
+
+I'm also not pleased with the battery life of my phone when the hotspot is enabled.
+Even if no devices are connected, it slams the battery, and so I've been toggling it
+on and off - which is annoying. I'd love to revive my BLE relay and experience with
+that instead of using the hotspot when on the road.
+
+Another "big one" would be to allow sessions to be managed on the device. Currently,
+the M2 is 100% dependent on clients enabling and disabling messages, which is kind of
+hard to manage in an environment with so many failure points between clients and the M2.
+A much better system would be for the M2 to what client are still listening and what
+messages they are interested in.

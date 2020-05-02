@@ -70,7 +70,7 @@ PacketSerial Mock;
 
 // Message flags
 // Each message can have up to 8 flags associated with it
-// These flags are set remoted by using the command interface
+// These flags are set remotely by using the command interface
 
 #define CAN_MSG_FLAG_TRANSMIT 0x01 // Flags this message for transmission over the air
 
