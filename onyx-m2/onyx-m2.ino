@@ -1,20 +1,18 @@
 // Onyx firmware for Macchina M2
 
-#include "variant.h"
+#include <variant.h>
 #include <due_can.h>
 #include <PacketSerial.h>
+#include "config.h"
 
 #define FIRMWARE_NAME "Onyx M2 Firmware"
 #define FIRMWARE_VERSION 5
 
-#define WANT_LOGGING 0
-#if WANT_LOGGING == 1
-  #define STARTLOG() while(!SerialUSB){delay(100);}
+#if WANT_M2_LOGGING == 1
   #define LOG(t) SerialUSB.println(t)
   #define LOG2(t1, t2) SerialUSB.print(t1);SerialUSB.print(" ");SerialUSB.println(t2)
   #define LOG3(t1, t2, t3) SerialUSB.print(t1);SerialUSB.print(" ");SerialUSB.print(t2);SerialUSB.print(" ");SerialUSB.println(t3)
 #else
-  #define STARTLOG()
   #define LOG(t)
   #define LOG2(t1, t2)
   #define LOG3(t1, t2, t3)
@@ -32,8 +30,11 @@
 #define Xbee Serial
 PacketSerial SuperB;
 
-// Can0 is connected to the ETH CAN bus on a TM3
-#define Tesla Can0
+// Tesla Model 3 Can buses
+// Can0 is connected to the vehicle bus, under the center console at the back.
+// Can1 is connected to the chassis bus, under the passenger seat.
+#define VehicleCan Can0
+#define ChassisCan Can1
 
 // Mock is a mock device that is enabled when something is connected to the usb port.
 // This can be used to inject can message directly into the M2 for testing. It is
@@ -95,6 +96,8 @@ PacketSerial Mock;
 #define NOTIFY_WS_UP 0x03
 #define NOTIFY_WS_DOWN 0x04
 #define NOTIFY_LATENCY 0x05
+#define NOTIFY_BLE_CONNECTED 0x06
+#define NOTIFY_BLE_DISCONNECTED 0x07
 
 // Commands related constants
 #define SUPERB_TYPE_OFFSET 0
@@ -118,6 +121,7 @@ PacketSerial Mock;
 // visible in the enclosure). Yellow means wifi is up, green means ws is up.
 #define LED_WIFI_UP DS5
 #define LED_WS_UP DS6
+#define LED_BLE_CONNECTED DS4
 
 // The button activated SuperB programming mode is indicated with another set of
 // surface mount leds
@@ -208,6 +212,7 @@ void transmitBuffer(const uint8_t* buf, uint8_t size) {
 // Command processing. Each command has its own function, so this function only figures
 // what the command it and dispatches it.
 void onSuperB(const uint8_t* buf, size_t size) {
+  LOG2("SuperB msg, size=", size);
   uint8_t type = buf[SUPERB_TYPE_OFFSET];
   uint8_t id = buf[SUPERB_ID_OFFSET];
   uint8_t len = buf[SUPERB_LENGTH_OFFSET];
@@ -264,6 +269,7 @@ void onSuperBNotification(uint8_t id, const uint8_t* data) {
 
     case NOTIFY_WIFI_DOWN:
       LOG("WIFI DOWN");
+      digitalWrite(LED_WS_UP, HIGH);
       digitalWrite(LED_WIFI_UP, HIGH);
       break;
 
@@ -284,6 +290,17 @@ void onSuperBNotification(uint8_t id, const uint8_t* data) {
       break;
     }
 
+    case NOTIFY_BLE_CONNECTED:
+      LOG("BLE CONNECTED");
+      digitalWrite(LED_BLE_CONNECTED, LOW);
+      break;
+
+    case NOTIFY_BLE_DISCONNECTED:
+      LOG("BLE DISCONNECTED");
+      digitalWrite(LED_WS_UP, HIGH);
+      digitalWrite(LED_BLE_CONNECTED, HIGH);
+      break;
+
     default:
       LOG2("Unknown superb notification", id);
   }
@@ -297,14 +314,14 @@ void onMock(const uint8_t* buf, size_t size) {
 
 // Message processing. If the Tesla has a message available, we grab it and figure
 // out what to do with it.
-uint8_t pollTesla(uint32_t now) {
-  bool hasMessages = (Tesla.available() > 0);
+uint8_t pollTesla(CANRaw& can, uint32_t now) {
+  bool hasMessages = (can.available() > 0);
   if (!hasMessages) {
     return STATE_IDLE;
   }
 
   CAN_FRAME frame;
-  Tesla.read(frame);
+  can.read(frame);
   uint16_t id = (uint16_t) frame.id;
   uint8_t length = frame.length;
   uint8_t* data = frame.data.bytes;
@@ -369,11 +386,12 @@ void setup() {
   pinMode(LED_IDLE, OUTPUT);
   pinMode(LED_PASSIVE, OUTPUT);
   pinMode(LED_ACTIVE, OUTPUT);
-  setStateLedStatus(0);
   pinMode(LED_WIFI_UP, OUTPUT);
   pinMode(LED_WS_UP, OUTPUT);
+  pinMode(LED_BLE_CONNECTED, OUTPUT);
   digitalWrite(LED_WIFI_UP, HIGH);
   digitalWrite(LED_WS_UP, HIGH);
+  digitalWrite(LED_BLE_CONNECTED, HIGH);
 
   // Mode switching buttons and leds
   pinMode(LED_SUPERB_RED, OUTPUT);
@@ -383,7 +401,6 @@ void setup() {
   digitalWrite(LED_SUPERB_RED, HIGH);
   digitalWrite(LED_SUPERB_YELLOW, HIGH);
 
-  STARTLOG();
   LOG2("FIRMWARE:", FIRMWARE_NAME);
   LOG2("VERSION:", FIRMWARE_VERSION);
 
@@ -393,13 +410,16 @@ void setup() {
   SuperB.setPacketHandler(&onSuperB);
   LOG("SuperB setup done");
 
-  // Tesla is a CAN interface, so we'll start it up and initialize all 7 receive
-  // mailboxes to accept any standard frame (TM3 doesn't appear to use extended frames)
-  Tesla.begin(CAN_BPS_500K);
+  // We connect to the Tesla Model 3 chassis and vehicle buses, read-only, and we'll
+  // initialize all 7 receive mailboxes to accept any standard frame (TM3 doesn't
+  // appear to use extended frames)
+  VehicleCan.begin(CAN_BPS_500K);
+  ChassisCan.begin(CAN_BPS_500K);
   for (int i = 0; i < 7; i++) {
-    Tesla.setRXFilter(i, 0, 0, false);
+    VehicleCan.setRXFilter(i, 0, 0, false);
+    ChassisCan.setRXFilter(i, 0, 0, false);
   }
-  LOG("Tesla setup done");
+  LOG("CAN bus setup done");
 
   // The USB port is used either as a mock interface that allows direct injection of
   // CAN message on the M2, or a channel to flash the SuperB.
@@ -413,27 +433,26 @@ void setup() {
   setAllMsgFlags(0);
   LOG("Buffer initialization done");
 
-  // blink a number of times to identify the firmware version
-  for (int i = 0; i < FIRMWARE_VERSION; i++) {
-    delay(200);
-    digitalWrite(LED_IDLE, HIGH);
-    delay(200);
-    digitalWrite(LED_IDLE, LOW);
-  }
+  // Turn on the red idle light to indicate we're good to go
+  setStateLedStatus(LED_IDLE);
 }
 
 // Main controller loop. The buttons are checked (any press causes the mode to switch
 // to MODE_SUPERB), and the appropriate mode handler is dispatched.
 void loop() {
   if (mode == MODE_RUN) {
+    runModeLoop();
     if (digitalRead(Button1) == LOW || digitalRead(Button2) == LOW) {
       mode = MODE_SUPERB;
       LOG("Entering SuperB mode");
-      LOG("Hold BTN1 while pressing then releasing BTN2 to enter programming mode");
+      LOG("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
       pinMode(XBEE_RST, OUTPUT);
       pinMode(XBEE_MULT4, OUTPUT);
+      digitalWrite(LED_IDLE, HIGH);
+      digitalWrite(LED_BLE_CONNECTED, HIGH);
+      digitalWrite(LED_WS_UP, HIGH);
+      digitalWrite(LED_WIFI_UP, HIGH);
     }
-    runModeLoop();
   }
   else {
     superbModeLoop();
@@ -445,21 +464,20 @@ void loop() {
 void runModeLoop() {
   SuperB.update();
   uint32_t now = millis();
-  uint8_t state = pollTesla(now);
+  uint8_t vehicleState = pollTesla(VehicleCan, now);
+  uint8_t chassisState = pollTesla(ChassisCan, now);
 
-  // update mock interface is usb connected and no real can messages were received
-  if (state == STATE_IDLE) {
+  // update mock interface if usb is connected and no real can messages were received
+  if (vehicleState == STATE_IDLE && chassisState == STATE_IDLE) {
     Mock.update();
   }
 
   // store the timing of the last active and passive states
-  switch (state) {
-    case STATE_ACTIVE:
-      lastActiveMillis = now;
-      break;
-    case STATE_PASSIVE:
-      lastPassiveMillis = now;
-      break;
+  if (vehicleState == STATE_ACTIVE || chassisState == STATE_ACTIVE) {
+    lastActiveMillis = now;
+  }
+  if (vehicleState == STATE_PASSIVE || chassisState == STATE_PASSIVE) {
+    lastPassiveMillis = now;
   }
 
   // if the time interval since the last led change has expired, update the led
@@ -483,6 +501,7 @@ void runModeLoop() {
 // Main MODE_SUPERB loop. In this mode, the USB port is wired to the SuperB directly so
 // that the latter can be programmed directly if needed. This allows the SuperB to be
 // debugged by allowing its logging messages to get to the USB serial monitor.
+bool idleLedState = HIGH;
 void superbModeLoop() {
   if (SerialUSB.available() > 0) {
     Serial.write(SerialUSB.read());
@@ -507,5 +526,12 @@ void superbModeLoop() {
   } else {
     digitalWrite(LED_SUPERB_YELLOW, HIGH);
     digitalWrite(XBEE_MULT4, HIGH);
+  }
+
+  uint32_t now = millis();
+  if (now - lastLedChangeMillis > 1000) {
+    lastLedChangeMillis = now;
+    idleLedState = (idleLedState == HIGH) ? LOW : HIGH;
+    digitalWrite(LED_IDLE, idleLedState);
   }
 }
