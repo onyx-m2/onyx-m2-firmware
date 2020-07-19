@@ -25,20 +25,74 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 
 ## Flashing the SuperB
 
-1. Follow the instructions from Macchina to setup your Arduino environment for the SuperB (see the software section, skip the hardware section, https://docs.macchina.cc/superb-docs/flashing-superb#step-2-software)
+### Step 1
+Follow the instructions from Macchina to setup your Arduino environment for the SuperB (see the software section, skip the hardware section, https://docs.macchina.cc/superb-docs/flashing-superb#step-2-software)
 
-1b. The firmware is now too large for the default partition scheme, so you'll need to add a "huge app"
+### Step 2
+The firmware is now too large for the default partition scheme, and unfortunately Macchina's
+instructions have issues. I explain the issues [on the forums here](https://forum.macchina.cc/t/superb-esp32-ble-wifi-crash-due-to-partitions/1274/4). The gist is:
 
+- Change `--flash_size` from `detect` to `{build.flash_size}` in `platform.txt`
+- Change the superb entries in `boards.txt` as shown below
 
-2. Onyx M2 firmware is setup so that if you do the button combo, it'll drop into its `superb` mode, and allow the SuperB to be flashed as per the instructions from Macchina.
+The superb section of `boards.txt`:
+```
+superb.name=SuperB on M2
 
-3. Before actually flashing, open [config.h](onyx-superb/config.h), and setup your home and mobile wifi information.
+superb.upload.tool=esptool_py
+superb.upload.speed=115200
+superb.upload.maximum_data_size=327680
+superb.upload.wait_for_upload_port=true
 
-4. Also configure the websocket url and pin where your M2 server will be listening.
+superb.serial.disableDTR=true
+superb.serial.disableRTS=true
 
-4. Flash the SuperB sketch [onyx-superb.ino](onyx-superb/onyx-superb.ino) to the device.
+superb.build.mcu=esp32
+superb.build.core=esp32
+superb.build.variant=esp32
+superb.build.board=esp32_DEV
 
-5. The device will *not* cycle on its own, you need to power down the M2 by pulling the USB cable and reconnecting.
+superb.build.f_cpu=240000000L
+superb.build.flash_size=4MB
+superb.build.flash_freq=40m
+superb.build.flash_mode=dio
+superb.build.boot=dio
+superb.build.partitions=min_spiffs
+superb.build.defines=
+
+superb.menu.PartitionScheme.min_spiffs=Default OTA App (Max 1.9MB APP) with 190KB SPIFFS
+superb.menu.PartitionScheme.min_spiffs.build.partitions=min_spiffs
+superb.menu.PartitionScheme.min_spiffs.upload.maximum_size=1966080
+superb.menu.PartitionScheme.huge_app=Large App (Max 3MB) without OTA and a 1MB SPIFFS)
+superb.menu.PartitionScheme.huge_app.build.partitions=huge_app
+superb.menu.PartitionScheme.huge_app.upload.maximum_size=3145728
+
+superb.menu.DebugLevel.none=None
+superb.menu.DebugLevel.none.build.code_debug=0
+superb.menu.DebugLevel.error=Error
+superb.menu.DebugLevel.error.build.code_debug=1
+superb.menu.DebugLevel.warn=Warn
+superb.menu.DebugLevel.warn.build.code_debug=2
+superb.menu.DebugLevel.info=Info
+superb.menu.DebugLevel.info.build.code_debug=3
+superb.menu.DebugLevel.debug=Debug
+superb.menu.DebugLevel.debug.build.code_debug=4
+superb.menu.DebugLevel.verbose=Verbose
+superb.menu.DebugLevel.verbose.build.code_debug=5
+```
+
+### Step 3
+Begin the upload process to flash the SuperB sketch [onyx-superb.ino](onyx-superb/onyx-superb.ino)
+to the device. Once the build start to try to connect to the device:
+
+1. Hit `BTN1` to drop M2 into superb mode, and reset the superb
+2. Perform the hold `BTN2` while pressing and releasing `BTN1` and then releasing `BTN2`
+to initiate the download.
+
+Note: this step can be kind of finicky, and you might need a few attempts before it takes.
+
+### Step 4
+The device will *not* cycle on its own, you need to power down the M2 by pulling the USB cable and reconnecting.
 
 # Debugging
 
@@ -204,16 +258,19 @@ One of the big ones here is having to take the enclosure off to flash the superb
 would be great to be able to this through software, possibly by connecting to the usb
 port.
 
-It would also be nice to be able to change the wifi parameters without flashing! The M2
-has an onboard EEPROM, so it should be possible.
+DONE - EVERYTHING IS CONFIGURABLE USING BLE
+<s>It would also be nice to be able to change the wifi parameters without flashing! The M2
+has an onboard EEPROM, so it should be possible.</s>
 
-I'm also not pleased with the battery life of my phone when the hotspot is enabled.
+DONE
+<s>I'm also not pleased with the battery life of my phone when the hotspot is enabled.
 Even if no devices are connected, it slams the battery, and so I've been toggling it
 on and off - which is annoying. I'd love to revive my BLE relay and experience with
-that instead of using the hotspot when on the road.
+that instead of using the hotspot when on the road.</s>
 
-Another "big one" would be to allow sessions to be managed on the device. Currently,
+SOLVED, BUT NOT EXACTLY LIKE THIS, NOW HANDLED CLEANLY BY THE SERVER
+<s>Another "big one" would be to allow sessions to be managed on the device. Currently,
 the M2 is 100% dependent on clients enabling and disabling messages, which is kind of
 hard to manage in an environment with so many failure points between clients and the M2.
 A much better system would be for the M2 to know what clients are still listening and
-what messages they are interested in.
+what messages they are interested in.</s>
