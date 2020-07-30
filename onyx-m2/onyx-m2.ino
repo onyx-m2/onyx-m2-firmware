@@ -268,7 +268,7 @@ void onSuperBCommand(uint8_t id, const uint8_t* data) {
     case CMDID_SET_MSG_FLAGS: {
       uint16_t bus = data[0];
       uint16_t id = getUint16(&data[1]);
-      uint8_t flags = data[2];
+      uint8_t flags = data[3];
       LOG_D("CMDID_SET_MSG_FLAGS, bus: %d, id: %d, flags: %d", bus, id, flags);
       setMsgFlags(bus, id, flags);
       break;
@@ -448,7 +448,7 @@ void setup() {
   LOG_D("USB setup done");
 
   PRINT(" ---------------------------------------------");
-  PRINT("| O N Y X  M 2 - S U P E R B                  ");
+  PRINT("| O N Y X  M 2                                ");
   PRINT("|                                             ");
   PRINT("| https://github.com/onyx-m2/onyx-m2-firmware ");
   PRINT("| Revision 8095668                            ");
