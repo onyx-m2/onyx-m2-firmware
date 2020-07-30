@@ -1,29 +1,49 @@
-// Onyx firmware for Macchina M2
+//   ___  _  ___   ____  __  __  __ ___
+//  / _ \| \| \ \ / /\ \/ / |  \/  |_  )
+// | (_) | .` |\ V /  >  <  | |\/| |/ /
+//  \___/|_|\_| |_|  /_/\_\ |_|  |_/___|
+//
+// Firmware for Macchina M2
+// https://github.com/onyx-m2/onyx-m2-firmware
 
 #include <variant.h>
 #include <due_can.h>
 #include <PacketSerial.h>
-#include "config.h"
 
-#define FIRMWARE_NAME "Onyx M2 Firmware"
-#define FIRMWARE_VERSION 5
-
-#if WANT_M2_LOGGING == 1
-  #define LOG(t) SerialUSB.println(t)
-  #define LOG2(t1, t2) SerialUSB.print(t1);SerialUSB.print(" ");SerialUSB.println(t2)
-  #define LOG3(t1, t2, t3) SerialUSB.print(t1);SerialUSB.print(" ");SerialUSB.print(t2);SerialUSB.print(" ");SerialUSB.println(t3)
-#else
-  #define LOG(t)
-  #define LOG2(t1, t2)
-  #define LOG3(t1, t2, t3)
+// Logging is now controlled by the built in "core debug level", and means you
+// can control it from the Arduino menu (or vscode board config panel). If you don't
+// see anything other than "None", add the relevant entries in boards.txt for superb.
+#define PRINT(...)
+#define LOG_E(...)
+#define LOG_W(...)
+#define LOG_I(...)
+#define LOG_D(...)
+#ifndef CORE_DEBUG_LEVEL
+  #error "Update your boards.txt file to include CORE_DEBUG_LEVEL as per the README"
+#endif
+#if CORE_DEBUG_LEVEL > 0
+  char __log_buffer[256];
+  #define PRINT(...) sprintf(__log_buffer, __VA_ARGS__);SerialUSB.println(__log_buffer);
+  #define OUTPUT_LOG(level, ...) sprintf(__log_buffer, __VA_ARGS__);SerialUSB.print("[");SerialUSB.print(level);SerialUSB.print("][m2:");SerialUSB.print(__LINE__);SerialUSB.print("] ");SerialUSB.println(__log_buffer);
+  #define LOG_E(...) OUTPUT_LOG("E", __VA_ARGS__)
+#endif
+#if CORE_DEBUG_LEVEL > 1
+  #define LOG_W(...) OUTPUT_LOG("W", __VA_ARGS__)
+#endif
+#if CORE_DEBUG_LEVEL > 2
+  #define LOG_I(...) OUTPUT_LOG("I", __VA_ARGS__)
+#endif
+#if CORE_DEBUG_LEVEL > 3
+  #define LOG_D(...) OUTPUT_LOG("D", __VA_ARGS__)
 #endif
 
 // Serial maps to the BLE link xbee
 // BLE allows you transfer maximum of 20 bytes, so we'll keep everything under that
 // limit to allow atomic transmission of CAN messages (which works out well as CAN
-// messages max out at 15 bytes).
-// The format of the transmitted message is [timestamp | id | length | data]:
+// messages max out at 16 bytes).
+// The format of the transmitted message is [timestamp | bus | id | length | data]:
 // uint32_t timestamp (little endian milliseconds)
+// uint8_t bus (the source bus, vehicle:0, chassis:1)
 // uint16_t id (little endian message id)
 // uint8_t length (number of bytes of data)
 // uint8_t data[1..8] (signal data, up to 8 bytes worth)
@@ -34,7 +54,9 @@ PacketSerial SuperB;
 // Can0 is connected to the vehicle bus, under the center console at the back.
 // Can1 is connected to the chassis bus, under the passenger seat.
 #define VehicleCan Can0
+#define VEHICLE_BUS 0
 #define ChassisCan Can1
+#define CHASSIS_BUS 1
 
 // Mock is a mock device that is enabled when something is connected to the usb port.
 // This can be used to inject can message directly into the M2 for testing. It is
@@ -57,8 +79,9 @@ PacketSerial Mock;
 #define STATE_ACTIVE 2
 
 // Message size related constants
-#define CAN_MSG_SIZE 7        // Size of fixed part of can message
+#define CAN_MSG_SIZE 8        // Size of fixed part of can message
 #define CAN_MSG_MAX_LENGTH 8  // Maximum frame length
+#define CAN_BUS_COUNT 2       // Number of can buses
 #define CAN_MSG_COUNT 0x800   // Number of message ids
 #define CAN_MSG_MAX_SIZE 15   // Maximum size of a can message
 #define CAN_MSG_TS_OFFSET 0   // Offset of timestamp
@@ -73,7 +96,11 @@ PacketSerial Mock;
 // Each message can have up to 8 flags associated with it
 // These flags are set remotely by using the command interface
 
-#define CAN_MSG_FLAG_TRANSMIT 0x01 // Flags this message for transmission over the air
+// Flags this message for realtime OTA transmission
+#define CAN_MSG_FLAG_TRANSMIT 0x01
+
+// Flags this message for real time OTA transmission even if its value is unmodified
+#define CAN_MSG_FLAG_TRANSMIT_UNMODIFIED 0x02
 
 // SuperB interface
 // This allows the SuperB to relay commands from apps and send notifications to the M2
@@ -136,8 +163,8 @@ PacketSerial Mock;
 // The message buffer holds all incoming frames from the Tesla. This ends up being
 // very large, but the memory is there, so might as well use it. Having this allows
 // us to do away with ring buffers means we get write without blocking ever (mostly).
-uint8_t canMsgFlags[CAN_MSG_COUNT];
-uint8_t canMsgBuffer[CAN_MSG_COUNT][CAN_MSG_MAX_SIZE];
+uint8_t canMsgFlags[CAN_BUS_COUNT][CAN_MSG_COUNT];
+uint8_t canMsgBuffer[CAN_BUS_COUNT][CAN_MSG_COUNT][CAN_MSG_MAX_SIZE];
 
 // Global state variables
 uint8_t mode = MODE_RUN;
@@ -147,28 +174,28 @@ uint32_t lastLedChangeMillis = 0;
 
 // Clear all message buffers.
 void clearAllMsgBuffers() {
-  uint8_t* pb = &canMsgBuffer[0][0];
-  for (int i = CAN_MSG_COUNT * CAN_MSG_MAX_SIZE; i > 0; i--) {
+  uint8_t* pb = &canMsgBuffer[0][0][0];
+  for (int i = CAN_BUS_COUNT * CAN_MSG_COUNT * CAN_MSG_MAX_SIZE; i > 0; i--) {
     *pb++ = 0;
   }
 }
 
 // Set the specified flags to all messages.
 void setAllMsgFlags(uint8_t flags) {
-  uint8_t* pb = &canMsgFlags[0];
-  for (int i = CAN_MSG_COUNT; i > 0; i--) {
+  uint8_t* pb = &canMsgFlags[0][0];
+  for (int i = CAN_BUS_COUNT * CAN_MSG_COUNT; i > 0; i--) {
     *pb++ = flags;
   }
 }
 
 // Set the specified flags of the specified message id.
-void setMsgFlags(uint16_t id, uint8_t flags) {
-  canMsgFlags[id] = flags;
+void setMsgFlags(uint8_t bus, uint16_t id, uint8_t flags) {
+  canMsgFlags[bus][id] = flags;
 }
 
 // Verify if the specified flag is set for the specified message id.
-bool isMsgFlagSet(uint16_t id, uint8_t flag) {
-  return (canMsgFlags[id] & flag) == flag;
+bool isMsgFlagSet(uint8_t bus, uint16_t id, uint8_t flag) {
+  return (canMsgFlags[bus][id] & flag) == flag;
 }
 
 // Extract a uint32 value from a buffer (little endian).
@@ -188,16 +215,16 @@ uint32_t getUint16(const uint8_t* pmsg) {
 }
 
 // Get the last timestamp of the specified message id.
-uint32_t getMsgTimestamp(uint16_t id) {
-  return getUint32(&canMsgBuffer[id][CAN_MSG_TS_OFFSET]);
+uint32_t getMsgTimestamp(uint8_t bus, uint16_t id) {
+  return getUint32(&canMsgBuffer[bus][id][CAN_MSG_TS_OFFSET]);
 }
 
 // Transmit the message of the specified id, if it has a value (timestamp is not zero).
-void transmitMsg(uint16_t id) {
-  if (getMsgTimestamp(id) != 0) {
-    uint8_t* pmsg = canMsgBuffer[id];
+void transmitMsg(uint8_t bus, uint16_t id) {
+  if (getMsgTimestamp(bus, id) != 0) {
+    uint8_t* pmsg = canMsgBuffer[bus][id];
     uint8_t size = CAN_MSG_SIZE + pmsg[CAN_MSG_LEN_OFFSET];
-    LOG3("SB <-", (int) pmsg, size);
+    LOG_D("SB <- %d, size: %d", (int) pmsg, size);
     transmitBuffer(pmsg, size);
   }
 }
@@ -212,13 +239,12 @@ void transmitBuffer(const uint8_t* buf, uint8_t size) {
 // Command processing. Each command has its own function, so this function only figures
 // what the command it and dispatches it.
 void onSuperB(const uint8_t* buf, size_t size) {
-  LOG2("SuperB msg, size=", size);
+  LOG_D("SuperB msg, size: %d", size);
   uint8_t type = buf[SUPERB_TYPE_OFFSET];
   uint8_t id = buf[SUPERB_ID_OFFSET];
   uint8_t len = buf[SUPERB_LENGTH_OFFSET];
   if (len != size - SUPERB_DATA_OFFSET) {
-    LOG3("Invalid superb message", type, id);
-    LOG3("Length mismatch", len, size);
+    LOG_W("Invalid superb message, length mismatch, type: %d, id: %d, len: %d, size: %d", type, id, len, size);
     return;
   }
   const uint8_t* data = &buf[SUPERB_DATA_OFFSET];
@@ -234,28 +260,30 @@ void onSuperBCommand(uint8_t id, const uint8_t* data) {
   switch (id) {
     case CMDID_SET_ALL_MSG_FLAGS: {
       uint8_t flags = data[0];
-      LOG2("CMDID_SET_ALL_MSG_FLAGS", flags);
+      LOG_D("CMDID_SET_ALL_MSG_FLAGS, flags: %d", flags);
       setAllMsgFlags(flags);
       break;
     }
 
     case CMDID_SET_MSG_FLAGS: {
-      uint16_t id = getUint16(&data[0]);
+      uint16_t bus = data[0];
+      uint16_t id = getUint16(&data[1]);
       uint8_t flags = data[2];
-      LOG3("CMDID_SET_MSG_FLAGS", id, flags);
-      setMsgFlags(id, flags);
+      LOG_D("CMDID_SET_MSG_FLAGS, bus: %d, id: %d, flags: %d", bus, id, flags);
+      setMsgFlags(bus, id, flags);
       break;
     }
 
     case CMDID_GET_MSG_LAST_VALUE: {
-      uint16_t id = getUint16(&data[0]);
-      LOG2("CMDID_GET_MSG_LAST_VALUE", id);
-      transmitMsg(id);
+      uint16_t bus = data[0];
+      uint16_t id = getUint16(&data[1]);
+      LOG_D("CMDID_GET_MSG_LAST_VALUE, bus: %d, id: %d", bus, id);
+      transmitMsg(bus, id);
       break;
     }
 
     default:
-      LOG2("Unknown superb command", id);
+      LOG_W("Unknown superb command, id: %d", id);
   }
 }
 
@@ -263,46 +291,46 @@ void onSuperBNotification(uint8_t id, const uint8_t* data) {
   switch (id) {
 
     case NOTIFY_WIFI_UP:
-      LOG("WIFI UP");
+      LOG_I("WIFI UP");
       digitalWrite(LED_WIFI_UP, LOW);
       break;
 
     case NOTIFY_WIFI_DOWN:
-      LOG("WIFI DOWN");
+      LOG_I("WIFI DOWN");
       digitalWrite(LED_WS_UP, HIGH);
       digitalWrite(LED_WIFI_UP, HIGH);
       break;
 
     case NOTIFY_WS_UP:
-      LOG("WS UP");
+      LOG_I("WS UP");
       digitalWrite(LED_WS_UP, LOW);
       break;
 
     case NOTIFY_WS_DOWN:
-      LOG("WS DOWN");
+      LOG_I("WS DOWN");
       digitalWrite(LED_WS_UP, HIGH);
       break;
 
     case NOTIFY_LATENCY: {
       uint16_t latency = getUint16(&data[0]);
       int8_t rssi = (int8_t) data[2];
-      LOG3("WS Latency and RSSI", latency, rssi);
+      LOG_D("WS, latency: %d, RSSI: %d", latency, rssi);
       break;
     }
 
     case NOTIFY_BLE_CONNECTED:
-      LOG("BLE CONNECTED");
+      LOG_I("BLE CONNECTED");
       digitalWrite(LED_BLE_CONNECTED, LOW);
       break;
 
     case NOTIFY_BLE_DISCONNECTED:
-      LOG("BLE DISCONNECTED");
+      LOG_I("BLE DISCONNECTED");
       digitalWrite(LED_WS_UP, HIGH);
       digitalWrite(LED_BLE_CONNECTED, HIGH);
       break;
 
     default:
-      LOG2("Unknown superb notification", id);
+      LOG_W("Unknown superb notification: %d", id);
   }
 }
 
@@ -312,9 +340,9 @@ void onMock(const uint8_t* buf, size_t size) {
   transmitBuffer(buf, size);
 }
 
-// Message processing. If the Tesla has a message available, we grab it and figure
+// Message processing. If the can bus has a message available, we grab it and figure
 // out what to do with it.
-uint8_t pollTesla(CANRaw& can, uint32_t now) {
+uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
   bool hasMessages = (can.available() > 0);
   if (!hasMessages) {
     return STATE_IDLE;
@@ -325,21 +353,23 @@ uint8_t pollTesla(CANRaw& can, uint32_t now) {
   uint16_t id = (uint16_t) frame.id;
   uint8_t length = frame.length;
   uint8_t* data = frame.data.bytes;
+  bool modified = false;
 
   // verify that the frame is valid from our point of view
   // (we only support standard frames, and length is clamped)
   if (id < CAN_MSG_COUNT && length <= CAN_MSG_MAX_LENGTH) {
-    uint8_t* pmsg = canMsgBuffer[id];
-    uint32_t prevts = getMsgTimestamp(id);//getUint32(pmsg);
+    uint8_t* pmsg = canMsgBuffer[bus][id];
+    uint32_t prevts = getMsgTimestamp(bus, id);
 
     // apply per message rate limiting, ignoring any that are arriving too quickly
     if (now - prevts > CAN_MSG_RATE_LIMIT) {
-      LOG3("M2 ->", id, (int) pmsg);
+      LOG_D("M2 -> %d %d", id, (int) pmsg);
 
       *pmsg++ = (uint8_t)(now & 0xff);
       *pmsg++ = (uint8_t)(now >> 8);
       *pmsg++ = (uint8_t)(now >> 16);
       *pmsg++ = (uint8_t)(now >> 24);
+      *pmsg++ = bus;
       *pmsg++ = (uint8_t)(frame.id & 0xff);
       *pmsg++ = (uint8_t)(frame.id >> 8);
       *pmsg++ = length;
@@ -350,6 +380,13 @@ uint8_t pollTesla(CANRaw& can, uint32_t now) {
       if (id != MSGID_UNIX_TIME) {
         while (length--) {
           *pmsg++ = *data++;
+          // uint8_t src = *data++;
+          // uint8_t dst = *pmsg;
+          // if (src != dst) {
+          //   modified = true;
+          //   *pmsg = src;
+          // }
+          // pmsg++;
         }
       }
       else {
@@ -360,8 +397,10 @@ uint8_t pollTesla(CANRaw& can, uint32_t now) {
       }
 
       // only transmit if this msg if its transmit flag is set
-      if (isMsgFlagSet(id, CAN_MSG_FLAG_TRANSMIT)) {
-        transmitBuffer(canMsgBuffer[id], CAN_MSG_SIZE + frame.length);
+      if (isMsgFlagSet(bus, id, CAN_MSG_FLAG_TRANSMIT)) {
+      // if ((isMsgFlagSet(id, CAN_MSG_FLAG_TRANSMIT) && modified) ||
+      //     isMsgFlagSet(id, CAN_MSG_FLAG_TRANSMIT_UNMODIFIED)) {
+        transmitBuffer(canMsgBuffer[bus][id], CAN_MSG_SIZE + frame.length);
         return STATE_ACTIVE;
       }
     }
@@ -401,14 +440,26 @@ void setup() {
   digitalWrite(LED_SUPERB_RED, HIGH);
   digitalWrite(LED_SUPERB_YELLOW, HIGH);
 
-  LOG2("FIRMWARE:", FIRMWARE_NAME);
-  LOG2("VERSION:", FIRMWARE_VERSION);
+  // The USB port is used either as a mock interface that allows direct injection of
+  // CAN message on the M2, or a channel to flash the SuperB.
+  SerialUSB.begin(115200);
+  Mock.setStream(&SerialUSB);
+  Mock.setPacketHandler(&onMock);
+  LOG_D("USB setup done");
+
+  PRINT(" ---------------------------------------------");
+  PRINT("| O N Y X  M 2 - S U P E R B                  ");
+  PRINT("|                                             ");
+  PRINT("| https://github.com/onyx-m2/onyx-m2-firmware ");
+  PRINT("| Revision 8095668                            ");
+  PRINT("| %s", __DATE__);
+  PRINT(" ---------------------------------------------");
 
   // SuperB is reached through the Xbee serial interface, which uses COBS encoding
   Xbee.begin(115200);
   SuperB.setStream(&Xbee);
   SuperB.setPacketHandler(&onSuperB);
-  LOG("SuperB setup done");
+  LOG_D("SuperB setup done");
 
   // We connect to the Tesla Model 3 chassis and vehicle buses, read-only, and we'll
   // initialize all 7 receive mailboxes to accept any standard frame (TM3 doesn't
@@ -419,19 +470,12 @@ void setup() {
     VehicleCan.setRXFilter(i, 0, 0, false);
     ChassisCan.setRXFilter(i, 0, 0, false);
   }
-  LOG("CAN bus setup done");
-
-  // The USB port is used either as a mock interface that allows direct injection of
-  // CAN message on the M2, or a channel to flash the SuperB.
-  SerialUSB.begin(115200);
-  Mock.setStream(&SerialUSB);
-  Mock.setPacketHandler(&onMock);
-  LOG("USB setup done");
+  LOG_D("CAN bus setup done");
 
   // initialize our internal buffers
   clearAllMsgBuffers();
   setAllMsgFlags(0);
-  LOG("Buffer initialization done");
+  LOG_D("Buffer initialization done");
 
   // Turn on the red idle light to indicate we're good to go
   setStateLedStatus(LED_IDLE);
@@ -444,8 +488,8 @@ void loop() {
     runModeLoop();
     if (digitalRead(Button1) == LOW || digitalRead(Button2) == LOW) {
       mode = MODE_SUPERB;
-      LOG("Entering SuperB mode");
-      LOG("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
+      PRINT("Entering SuperB mode");
+      PRINT("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
       pinMode(XBEE_RST, OUTPUT);
       pinMode(XBEE_MULT4, OUTPUT);
       digitalWrite(LED_IDLE, HIGH);
@@ -464,8 +508,8 @@ void loop() {
 void runModeLoop() {
   SuperB.update();
   uint32_t now = millis();
-  uint8_t vehicleState = pollTesla(VehicleCan, now);
-  uint8_t chassisState = pollTesla(ChassisCan, now);
+  uint8_t vehicleState = pollCanBus(VehicleCan, VEHICLE_BUS, now);
+  uint8_t chassisState = pollCanBus(ChassisCan, CHASSIS_BUS, now);
 
   // update mock interface if usb is connected and no real can messages were received
   if (vehicleState == STATE_IDLE && chassisState == STATE_IDLE) {

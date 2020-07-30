@@ -17,11 +17,43 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 
 ## Flashing the M2
 
-1. Follow the instructions from Macchina to setup your Arduino environment if that's not done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
+### Step 1
+Follow the instructions from Macchina to setup your Arduino environment if that's not done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
 
-2. Flash the M2 sketch [onyx-m2.ino](onyx-m2/onyx-m2.ino) onto to the M2.
+### Step 2
+The firmware uses extra settings from the Arduino environment that aren't in the Macchina instructions, in
+particular, for logging. You can set the logging levels desired in the board config menu (much like with the
+esp32 does out of the box). To set this up, add the following lines to the `boards.txt` file for the `sam`
+hardware, just after the entries for `m2`:
 
-3. The device should restart on its own. At this point, the M2 is in `run` mode, but the SuperB is not operational yet.
+```
+menu.DebugLevel=Core Debug Level
+m2.menu.DebugLevel.none=None
+m2.menu.DebugLevel.none.build.code_debug=0
+m2.menu.DebugLevel.error=Error
+m2.menu.DebugLevel.error.build.code_debug=1
+m2.menu.DebugLevel.warn=Warn
+m2.menu.DebugLevel.warn.build.code_debug=2
+m2.menu.DebugLevel.info=Info
+m2.menu.DebugLevel.info.build.code_debug=3
+m2.menu.DebugLevel.debug=Debug
+m2.menu.DebugLevel.debug.build.code_debug=4
+m2.menu.DebugLevel.verbose=Verbose
+m2.menu.DebugLevel.verbose.build.code_debug=5
+```
+Next find the line in the same file that starts with `m2.build.extra_flags`, and add:
+```
+-DCORE_DEBUG_LEVEL={build.code_debug}
+```
+As of this writing, the entire line should read:
+```
+m2.build.extra_flags=-D__SAM3X8E__ -mthumb {build.usb_flags} -DCORE_DEBUG_LEVEL={build.code_debug}
+```
+
+### Step 3
+Flash the M2 sketch [onyx-m2.ino](onyx-m2/onyx-m2.ino) onto to the M2.
+
+The device should restart on its own. At this point, the M2 is in `run` mode, but the SuperB is not operational yet.
 
 ## Flashing the SuperB
 
