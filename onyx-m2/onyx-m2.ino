@@ -197,7 +197,7 @@ struct CanMsg {
   }
 
   bool has(uint8_t flag) {
-    return flags & flag == flag;
+    return (flags & flag) == flag;
   }
 
   void update(CAN_FRAME frame, uint32_t now) {
