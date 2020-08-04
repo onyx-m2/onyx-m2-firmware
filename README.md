@@ -189,7 +189,7 @@ message, both to reduce latency and bandwidth requirements. Additionally, an eff
 was made to keep each message under 20 bytes to allow each to be send in a single BLE
 (Bluetooth Low Energy) packet.
 
-All messages are binary coded as `timestamp` | `id` | `length` | `data` tuples, where
+All messages are binary coded as `timestamp` |`bus` | `id` | `length` | `data` tuples, where
   - `timestamp` is `4` bytes, representing a 32 bit little endian encoded milliseconds
     timestamp, zeroed at device startup
   - `id` is `2` bytes, representing a 16 bit little endian CAN message id (this

@@ -8,6 +8,7 @@
 
 #include <variant.h>
 #include <due_can.h>
+#include <Arduino_Due_SD_HSMCI.h>
 #include <PacketSerial.h>
 
 // Logging is now controlled by the built in "core debug level", and means you
@@ -53,15 +54,20 @@ PacketSerial SuperB;
 // Tesla Model 3 Can buses
 // Can0 is connected to the vehicle bus, under the center console at the back.
 // Can1 is connected to the chassis bus, under the passenger seat.
-#define VehicleCan Can0
-#define VEHICLE_BUS 0
-#define ChassisCan Can1
-#define CHASSIS_BUS 1
+#define VehCan Can0
+#define VEH_BUS 0
+#define ChCan Can1
+#define CH_BUS 1
 
 // Mock is a mock device that is enabled when something is connected to the usb port.
 // This can be used to inject can message directly into the M2 for testing. It is
 // designed to be used with the 'bin/onyx-serial-replay' script.
 PacketSerial Mock;
+
+// FS allows access to the SD card for data logging.
+#define DATALOGGING_DIRECTORY "logs"
+#define DATALOGGING_FLUSH_INTERVAL 1000
+FileStore FS;
 
 // Mode constants
 // The firmware has 2 completely separate modes of operation
@@ -82,15 +88,15 @@ PacketSerial Mock;
 #define CAN_MSG_SIZE 8        // Size of fixed part of can message
 #define CAN_MSG_MAX_LENGTH 8  // Maximum frame length
 #define CAN_BUS_COUNT 2       // Number of can buses
-#define CAN_MSG_COUNT 0x800   // Number of message ids
+#define CAN_MSG_COUNT 2048    // Number of message ids
 #define CAN_MSG_MAX_SIZE 15   // Maximum size of a can message
 #define CAN_MSG_TS_OFFSET 0   // Offset of timestamp
 #define CAN_MSG_ID_OFFSET 4   // Offset of message id
-#define CAN_MSG_LEN_OFFSET 6  // Offset of message payload length
+#define CAN_MSG_LEN_OFFSET 7  // Offset of message payload length
 
 // Rate limiting constant
 // This limits any one message id to the specified period in milliseconds
-#define CAN_MSG_RATE_LIMIT 250
+#define CAN_MSG_DEFAULT_TRANSMIT_INTERVAL 250
 
 // Message flags
 // Each message can have up to 8 flags associated with it
@@ -115,6 +121,8 @@ PacketSerial Mock;
 #define CMDID_SET_ALL_MSG_FLAGS 0x01
 #define CMDID_SET_MSG_FLAGS 0x02
 #define CMDID_GET_MSG_LAST_VALUE 0x03
+#define CMDID_GET_ALL_MSG_LAST_VALUE 0x04
+#define CMDID_TAKE_SNAPSHOT 0x05
 
 // Notification interface
 // This allows the SuperB to send notifications in realtime to the M2
@@ -133,7 +141,9 @@ PacketSerial Mock;
 #define SUPERB_DATA_OFFSET 3
 
 // Message ids
+#define MSGID_SYSTEM_TIME 792
 #define MSGID_UNIX_TIME 1320
+#define MSGID_VIN_INFO 1029
 
 // LED colours
 // When powered, the red led is, flashing the version number at startup.
@@ -156,84 +166,165 @@ PacketSerial Mock;
 #define LED_SUPERB_RED DS2
 
 // How fast can an led change colour
-#define LEDCFG_CHANGE_PERIOD 1000
+#define LEDCFG_CHANGE_INTERVAL 1000
 
 // Firmware buffers
 // The message flags buffer hold the current flag values for all messages.
 // The message buffer holds all incoming frames from the Tesla. This ends up being
 // very large, but the memory is there, so might as well use it. Having this allows
 // us to do away with ring buffers means we get write without blocking ever (mostly).
-uint8_t canMsgFlags[CAN_BUS_COUNT][CAN_MSG_COUNT];
-uint8_t canMsgBuffer[CAN_BUS_COUNT][CAN_MSG_COUNT][CAN_MSG_MAX_SIZE];
+struct CanMsg {
+  uint32_t timestamp;
+  uint32_t transmitTimestamp;
+  uint16_t id;
+  uint8_t bus;
+  uint8_t flags;
+  uint8_t length;
+  uint8_t transmitInterval;
+  uint8_t values[CAN_MSG_MAX_LENGTH];
+  uint8_t transmitValues[CAN_MSG_MAX_LENGTH];
+
+  CanMsg(uint8_t _bus, uint16_t _id) :
+    timestamp(0),
+    transmitTimestamp(0),
+    id(_id),
+    bus(_bus),
+    flags(0),
+    length(0),
+    transmitInterval(CAN_MSG_DEFAULT_TRANSMIT_INTERVAL) {
+      memset(values, 0, sizeof(values));
+      memset(transmitValues, 0, sizeof(transmitValues));
+  }
+
+  bool has(uint8_t flag) {
+    return flags & flag == flag;
+  }
+
+  void update(CAN_FRAME frame, uint32_t now) {
+    timestamp = now;
+    length = frame.length;
+    memcpy(values, frame.data.bytes, length);
+  }
+
+  void pack(uint8_t* buf, uint8_t* size) {
+    *buf++ = (uint8_t)(timestamp & 0xff);
+    *buf++ = (uint8_t)(timestamp >> 8);
+    *buf++ = (uint8_t)(timestamp >> 16);
+    *buf++ = (uint8_t)(timestamp >> 24);
+    *buf++ = bus;
+    *buf++ = (uint8_t)(id & 0xff);
+    *buf++ = (uint8_t)(id >> 8);
+    *buf++ = length;
+    // super annoying bug with unix time being big endian while everything else
+    // is little endian; let's not slow down regular processing and just have
+    // explicit copy statements for unix time
+    if (id == MSGID_UNIX_TIME) {
+      buf[0] = values[3];
+      buf[1] = values[2];
+      buf[2] = values[1];
+      buf[3] = values[0];
+    }
+    else {
+      memcpy(buf, values, length);
+    }
+    *size = CAN_MSG_SIZE + length;
+  }
+
+  bool transmit(uint32_t now) {
+    // check transmission inteval
+    if (now - transmitTimestamp < transmitInterval) {
+      return false;
+    }
+    // check for transmission flags: if "transmit unmodified" is set, msg goes; if
+    // "transmit" is set, check that the values have changed
+    if (!has(CAN_MSG_FLAG_TRANSMIT_UNMODIFIED)) {
+      if (!has(CAN_MSG_FLAG_TRANSMIT)) {
+        return false;
+      }
+      if (memcmp(values, transmitValues, length) == 0) {
+        return false;
+      }
+    }
+    // if all the above tests passed, snapshot the data that will be transmitted
+    transmitTimestamp = timestamp;
+    memcpy(transmitValues, values, length);
+    return true;
+  }
+};
+
+CanMsg* canMsgs[CAN_BUS_COUNT][CAN_MSG_COUNT];
+
+CanMsg* createOrGetMsg(uint8_t bus, uint16_t id) {
+  CanMsg* msg = canMsgs[bus][id];
+  if (msg == NULL) {
+    msg = canMsgs[bus][id] = new CanMsg(bus, id);
+  }
+  return msg;
+}
 
 // Global state variables
 uint8_t mode = MODE_RUN;
 uint32_t lastActiveMillis = 0;
 uint32_t lastPassiveMillis = 0;
 uint32_t lastLedChangeMillis = 0;
+bool dataLoggingEnabled = false;
+bool dataLoggingFileCreated = false;
+uint32_t dataLoggingLastFlushMillis = 0;
 
-// Clear all message buffers.
-void clearAllMsgBuffers() {
-  uint8_t* pb = &canMsgBuffer[0][0][0];
-  for (int i = CAN_BUS_COUNT * CAN_MSG_COUNT * CAN_MSG_MAX_SIZE; i > 0; i--) {
-    *pb++ = 0;
-  }
+// Initialize can message array.
+void initAllMsgs() {
+  memset(canMsgs, 0, sizeof(canMsgs));
 }
 
-// Set the specified flags to all messages.
-void setAllMsgFlags(uint8_t flags) {
-  uint8_t* pb = &canMsgFlags[0][0];
-  for (int i = CAN_BUS_COUNT * CAN_MSG_COUNT; i > 0; i--) {
-    *pb++ = flags;
-  }
-}
-
-// Set the specified flags of the specified message id.
+// Set the flags on the specific message on the specified bus.
 void setMsgFlags(uint8_t bus, uint16_t id, uint8_t flags) {
-  canMsgFlags[bus][id] = flags;
+  CanMsg* msg = createOrGetMsg(bus, id);
+  msg->flags = flags;
 }
 
-// Verify if the specified flag is set for the specified message id.
-bool isMsgFlagSet(uint8_t bus, uint16_t id, uint8_t flag) {
-  return (canMsgFlags[bus][id] & flag) == flag;
-}
-
-// Extract a uint32 value from a buffer (little endian).
-uint32_t getUint32(const uint8_t* pmsg) {
-  uint32_t v = pmsg[0]
-    | ((uint32_t) pmsg[1]) << 8
-    | ((uint32_t) pmsg[2]) << 16
-    | ((uint32_t) pmsg[3]) << 24;
-  return v;
+// Set the specified flags to all (previously created) messages.
+void setAllMsgFlags(uint8_t flags) {
+  for (int id = 0; id < CAN_MSG_COUNT; id++) {
+    for (int bus = 0; bus < CAN_BUS_COUNT; bus++) {
+      CanMsg* msg = canMsgs[bus][id];
+      if (msg != NULL) {
+        msg->flags = flags;
+      }
+    }
+  }
 }
 
 // Extract a uint16 value from a buffer (little endian).
-uint32_t getUint16(const uint8_t* pmsg) {
-  uint16_t v = pmsg[0]
-    | ((uint16_t) pmsg[1]) << 8;
+uint32_t getUint16(const uint8_t* buf) {
+  uint16_t v = buf[0] | ((uint16_t) buf[1]) << 8;
   return v;
 }
 
-// Get the last timestamp of the specified message id.
-uint32_t getMsgTimestamp(uint8_t bus, uint16_t id) {
-  return getUint32(&canMsgBuffer[bus][id][CAN_MSG_TS_OFFSET]);
-}
-
 // Transmit the message of the specified id, if it has a value (timestamp is not zero).
-void transmitMsg(uint8_t bus, uint16_t id) {
-  if (getMsgTimestamp(bus, id) != 0) {
-    uint8_t* pmsg = canMsgBuffer[bus][id];
-    uint8_t size = CAN_MSG_SIZE + pmsg[CAN_MSG_LEN_OFFSET];
-    LOG_D("SB <- %d, size: %d", (int) pmsg, size);
-    transmitBuffer(pmsg, size);
+// Explicitly transmitting a msg doesn't trigger the transmission filters or affect
+// future msg processing in any way.
+bool transmitMsg(uint8_t bus, uint16_t id) {
+  CanMsg* msg = canMsgs[bus][id];
+  if (msg != NULL && msg->timestamp != 0) {
+    uint8_t buf[CAN_MSG_MAX_SIZE];
+    uint8_t size;
+    msg->pack(buf, &size);
+    SuperB.send(buf, size);
+    return true;
   }
+  return false;
 }
 
-// Transmit the message buffer, but only if the message flag says so.
-// The state is active if the message was sent, and passive if the
-// message was ignored.
-void transmitBuffer(const uint8_t* buf, uint8_t size) {
-  SuperB.send(buf, size);
+// Transmit all messages that currently hold a value. This will take a long time, and
+// is meant as a diagnostic tool only.
+void transmitAllMsgs() {
+  for (int id = 0; id < CAN_MSG_COUNT; id++) {
+    for (int bus = 0; bus < 2; bus++) {
+      if (transmitMsg(bus, id)) {
+        delay(10);
+      }
+    }
+  }
 }
 
 // Command processing. Each command has its own function, so this function only figures
@@ -279,6 +370,12 @@ void onSuperBCommand(uint8_t id, const uint8_t* data) {
       uint16_t id = getUint16(&data[1]);
       LOG_D("CMDID_GET_MSG_LAST_VALUE, bus: %d, id: %d", bus, id);
       transmitMsg(bus, id);
+      break;
+    }
+
+    case CMDID_GET_ALL_MSG_LAST_VALUE: {
+      LOG_D("CMDID_GET_ALL_MSG_LAST_VALUE");
+      transmitAllMsgs();
       break;
     }
 
@@ -336,8 +433,7 @@ void onSuperBNotification(uint8_t id, const uint8_t* data) {
 
 // Mock interface processing.
 void onMock(const uint8_t* buf, size_t size) {
-  uint16_t id = getUint16(&buf[CAN_MSG_ID_OFFSET]);
-  transmitBuffer(buf, size);
+  SuperB.send(buf, size);
 }
 
 // Message processing. If the can bus has a message available, we grab it and figure
@@ -352,59 +448,60 @@ uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
   can.read(frame);
   uint16_t id = (uint16_t) frame.id;
   uint8_t length = frame.length;
-  uint8_t* data = frame.data.bytes;
-  bool modified = false;
+
+  // throw away any VIN info messages (privacy reasons)
+  if (id == MSGID_VIN_INFO) {
+    return STATE_PASSIVE;
+  }
+
+  // if we haven't initialized the data logging file and logging is enabled, and
+  // this is the time msg, create a file using the timestamp as part of the filename
+  if (dataLoggingEnabled && !dataLoggingFileCreated && id == MSGID_SYSTEM_TIME) {
+    uint8_t* values = frame.data.bytes;
+    uint8_t year = values[0];
+    uint8_t month = values[1];
+    uint8_t seconds = values[2];
+    uint8_t hour = values[3];
+    uint8_t day = values[4];
+    uint8_t minutes = values[5];
+    char filename[64];
+    sprintf(filename, "can-%d-%d-%dT%d-%d-%d.dat", year, month, day, hour, minutes, seconds);
+    if (FS.CreateNew(DATALOGGING_DIRECTORY, filename)) {
+      dataLoggingFileCreated = true;
+      dataLoggingLastFlushMillis = now;
+    }
+    else {
+      // if the creation fails, data logging is disabled (which will happen eventually
+      // as the card will fill up)
+      dataLoggingEnabled = false;
+    }
+  }
 
   // verify that the frame is valid from our point of view
   // (we only support standard frames, and length is clamped)
   if (id < CAN_MSG_COUNT && length <= CAN_MSG_MAX_LENGTH) {
-    uint8_t* pmsg = canMsgBuffer[bus][id];
-    uint32_t prevts = getMsgTimestamp(bus, id);
 
-    // apply per message rate limiting, ignoring any that are arriving too quickly
-    if (now - prevts > CAN_MSG_RATE_LIMIT) {
-      LOG_D("M2 -> %d %d", id, (int) pmsg);
+    // store the msg internally
+    CanMsg* msg = createOrGetMsg(bus, id);
+    msg->update(frame, now);
 
-      *pmsg++ = (uint8_t)(now & 0xff);
-      *pmsg++ = (uint8_t)(now >> 8);
-      *pmsg++ = (uint8_t)(now >> 16);
-      *pmsg++ = (uint8_t)(now >> 24);
-      *pmsg++ = bus;
-      *pmsg++ = (uint8_t)(frame.id & 0xff);
-      *pmsg++ = (uint8_t)(frame.id >> 8);
-      *pmsg++ = length;
+    // pack the message into a buffer
+    uint8_t buf[CAN_MSG_MAX_SIZE];
+    uint8_t size;
+    msg->pack(buf, &size);
 
-      // super annoying bug with unix time being big endian while everything else
-      // is little endian; let's not slow down regular processing and just have
-      // explicit copy statements for unix time
-      if (id != MSGID_UNIX_TIME) {
-        while (length--) {
-          *pmsg++ = *data++;
-          // uint8_t src = *data++;
-          // uint8_t dst = *pmsg;
-          // if (src != dst) {
-          //   modified = true;
-          //   *pmsg = src;
-          // }
-          // pmsg++;
-        }
-      }
-      else {
-        pmsg[0] = data[3];
-        pmsg[1] = data[2];
-        pmsg[2] = data[1];
-        pmsg[3] = data[0];
-      }
+    // if the data logging file is ready, write this msg
+    if (dataLoggingFileCreated) {
+      FS.Write(reinterpret_cast<char *>(buf), size);
+    }
 
-      // only transmit if this msg if its transmit flag is set
-      if (isMsgFlagSet(bus, id, CAN_MSG_FLAG_TRANSMIT)) {
-      // if ((isMsgFlagSet(id, CAN_MSG_FLAG_TRANSMIT) && modified) ||
-      //     isMsgFlagSet(id, CAN_MSG_FLAG_TRANSMIT_UNMODIFIED)) {
-        transmitBuffer(canMsgBuffer[bus][id], CAN_MSG_SIZE + frame.length);
-        return STATE_ACTIVE;
-      }
+    // if this message should be transmitted, send to the superb
+    if (msg->transmit(now)) {
+      SuperB.send(buf, size);
+      return STATE_ACTIVE;
     }
   }
+
   return STATE_PASSIVE;
 }
 
@@ -464,18 +561,24 @@ void setup() {
   // We connect to the Tesla Model 3 chassis and vehicle buses, read-only, and we'll
   // initialize all 7 receive mailboxes to accept any standard frame (TM3 doesn't
   // appear to use extended frames)
-  VehicleCan.begin(CAN_BPS_500K);
-  ChassisCan.begin(CAN_BPS_500K);
+  VehCan.begin(CAN_BPS_500K);
+  ChCan.begin(CAN_BPS_500K);
   for (int i = 0; i < 7; i++) {
-    VehicleCan.setRXFilter(i, 0, 0, false);
-    ChassisCan.setRXFilter(i, 0, 0, false);
+    VehCan.setRXFilter(i, 0, 0, false);
+    ChCan.setRXFilter(i, 0, 0, false);
   }
   LOG_D("CAN bus setup done");
 
-  // initialize our internal buffers
-  clearAllMsgBuffers();
-  setAllMsgFlags(0);
+  // Initialize our internal buffers
+  initAllMsgs();
   LOG_D("Buffer initialization done");
+
+  // Initialize the SD card interface for data logging. If a card is not present, or
+  // not formatted correctly, the feature is disabled. We'll only create the file once
+  // we receive the first timestamp from the car's can bus.
+  if (SD.Init()) {
+    dataLoggingEnabled = true;
+  }
 
   // Turn on the red idle light to indicate we're good to go
   setStateLedStatus(LED_IDLE);
@@ -508,19 +611,19 @@ void loop() {
 void runModeLoop() {
   SuperB.update();
   uint32_t now = millis();
-  uint8_t vehicleState = pollCanBus(VehicleCan, VEHICLE_BUS, now);
-  uint8_t chassisState = pollCanBus(ChassisCan, CHASSIS_BUS, now);
+  uint8_t vehState = pollCanBus(VehCan, VEH_BUS, now);
+  uint8_t chState = pollCanBus(ChCan, CH_BUS, now);
 
   // update mock interface if usb is connected and no real can messages were received
-  if (vehicleState == STATE_IDLE && chassisState == STATE_IDLE) {
+  if (vehState == STATE_IDLE && chState == STATE_IDLE) {
     Mock.update();
   }
 
   // store the timing of the last active and passive states
-  if (vehicleState == STATE_ACTIVE || chassisState == STATE_ACTIVE) {
+  if (vehState == STATE_ACTIVE || chState == STATE_ACTIVE) {
     lastActiveMillis = now;
   }
-  if (vehicleState == STATE_PASSIVE || chassisState == STATE_PASSIVE) {
+  if (vehState == STATE_PASSIVE || chState == STATE_PASSIVE) {
     lastPassiveMillis = now;
   }
 
@@ -528,17 +631,27 @@ void runModeLoop() {
   // with the current state; if there were any active states during the interval,
   // the active led is show, if not passive states are checked, and if neither
   // of those occurred, the idle led is shown
-  if (now - lastLedChangeMillis > LEDCFG_CHANGE_PERIOD) {
-    if (now - lastActiveMillis < LEDCFG_CHANGE_PERIOD) {
+  if (now - lastLedChangeMillis > LEDCFG_CHANGE_INTERVAL) {
+    if (now - lastActiveMillis < LEDCFG_CHANGE_INTERVAL) {
       setStateLedStatus(LED_ACTIVE);
     }
-    else if (now - lastPassiveMillis < LEDCFG_CHANGE_PERIOD) {
+    else if (now - lastPassiveMillis < LEDCFG_CHANGE_INTERVAL) {
       setStateLedStatus(LED_PASSIVE);
     }
     else {
       setStateLedStatus(LED_IDLE);
     }
     lastLedChangeMillis = now;
+  }
+
+  // the data logging file needs to be flushed periodically to make sure it is
+  // in a coherent state when the power is turned off (not sure this will work as
+  // is though, what if power is cut during a flush? maybe the can bus will stop just
+  // prior to the power being turned off?)
+  if (dataLoggingFileCreated &&
+      (now - dataLoggingLastFlushMillis > DATALOGGING_FLUSH_INTERVAL)) {
+    FS.Flush();
+    dataLoggingLastFlushMillis = now;
   }
 }
 
