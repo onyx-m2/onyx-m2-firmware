@@ -66,6 +66,7 @@ PacketSerial Mock;
 
 // FS allows access to the SD card for data logging.
 #define DATALOGGING_DIRECTORY "logs"
+#define DATALOGGING_FILE_PREFIX "canmsgs"
 #define DATALOGGING_FLUSH_INTERVAL 1000
 FileStore FS;
 
@@ -123,6 +124,8 @@ FileStore FS;
 #define CMDID_GET_MSG_LAST_VALUE 0x03
 #define CMDID_GET_ALL_MSG_LAST_VALUE 0x04
 #define CMDID_TAKE_SNAPSHOT 0x05
+#define CMDID_START_LOGGING_TO_CUSTOM_FILE 0x06
+#define CMDID_STOP_LOGGING_TO_CUSTOM_FILE 0x07
 
 // Notification interface
 // This allows the SuperB to send notifications in realtime to the M2
@@ -268,8 +271,44 @@ uint32_t lastActiveMillis = 0;
 uint32_t lastPassiveMillis = 0;
 uint32_t lastLedChangeMillis = 0;
 bool dataLoggingEnabled = false;
+bool dataLoggingCardInserted = false;
 bool dataLoggingFileCreated = false;
+char dataLoggingFilePrefix[16];
 uint32_t dataLoggingLastFlushMillis = 0;
+
+// Update the state of the data logging facility by detecting whether a card was
+// newly insterted or removed. Intended to be called from the main loop.
+void updateDataLoggingState() {
+  int sdSwitch = digitalRead(SD_SW);
+  bool cardInserted = (sdSwitch == LOW);
+
+  // check whether the card was removed, and if so, turn off data logging
+  if (dataLoggingCardInserted && !cardInserted) {
+    LOG_I("Detected that the SD card was removed");
+    dataLoggingEnabled = false;
+    dataLoggingCardInserted = false;
+    dataLoggingFileCreated = false;
+  }
+
+  // check whether a card was newly inserted, and if so, attempt to initialize it;
+  // this may fail if the card is not supported and we'll act like there's no card
+  // inserted at all; note that the log file won't be created until the next time
+  // message is received from the car, which allows the file to be named with the
+  // data and time of a creation
+  if (!dataLoggingCardInserted && cardInserted) {
+    LOG_I("Detected that an SD card was inserted");
+    dataLoggingCardInserted = true;
+    dataLoggingFileCreated = false;
+    if (SD.Init()) {
+      LOG_I("Data logging card successfully initialized, enabling data logging");
+      dataLoggingEnabled = true;
+    }
+    else {
+      LOG_E("Failed to initialize data logging card, formating is probably not supported");
+      dataLoggingEnabled = false;
+    }
+  }
+}
 
 // Initialize can message array.
 void initAllMsgs() {
@@ -347,6 +386,7 @@ void onSuperB(const uint8_t* buf, size_t size) {
   }
 }
 
+// A command was sent through the superb.
 void onSuperBCommand(uint8_t id, const uint8_t* data) {
   switch (id) {
     case CMDID_SET_ALL_MSG_FLAGS: {
@@ -379,11 +419,33 @@ void onSuperBCommand(uint8_t id, const uint8_t* data) {
       break;
     }
 
+    case CMDID_START_LOGGING_TO_CUSTOM_FILE: {
+      const char* prefix = reinterpret_cast<const char*>(data);
+      LOG_D("CMDID_START_LOGGING_TO_CUSTOM_FILE, prefix: %s", prefix);
+      if (dataLoggingFileCreated) {
+        FS.Close();
+        dataLoggingFileCreated = false;
+      }
+      strcpy(dataLoggingFilePrefix, prefix);
+      break;
+    }
+
+    case CMDID_STOP_LOGGING_TO_CUSTOM_FILE: {
+      LOG_D("CMDID_STOP_LOGGING_TO_CUSTOM_FILE");
+      if (dataLoggingFileCreated) {
+        FS.Close();
+        dataLoggingFileCreated = false;
+      }
+      strcpy(dataLoggingFilePrefix, DATALOGGING_FILE_PREFIX);
+      break;
+    }
+
     default:
       LOG_W("Unknown superb command, id: %d", id);
   }
 }
 
+// The superb is notifying us that something has changed with its state.
 void onSuperBNotification(uint8_t id, const uint8_t* data) {
   switch (id) {
 
@@ -465,14 +527,14 @@ uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
     uint8_t day = values[4];
     uint8_t minutes = values[5];
     char filename[64];
-    sprintf(filename, "can-%d-%d-%dT%d-%d-%d.dat", year, month, day, hour, minutes, seconds);
+    sprintf(filename, "%s-%d-%d-%dT%d-%d-%d.dat", dataLoggingFilePrefix, year, month, day, hour, minutes, seconds);
     if (FS.CreateNew(DATALOGGING_DIRECTORY, filename)) {
       dataLoggingFileCreated = true;
       dataLoggingLastFlushMillis = now;
     }
     else {
       // if the creation fails, data logging is disabled (which will happen eventually
-      // as the card will fill up)
+      // as the card will fill up); this state will be reset if a new card is inserted
       dataLoggingEnabled = false;
     }
   }
@@ -537,6 +599,10 @@ void setup() {
   digitalWrite(LED_SUPERB_RED, HIGH);
   digitalWrite(LED_SUPERB_YELLOW, HIGH);
 
+  // SD card
+  pinMode(SD_SW, INPUT);
+  strcpy(dataLoggingFilePrefix, DATALOGGING_FILE_PREFIX);
+
   // The USB port is used either as a mock interface that allows direct injection of
   // CAN message on the M2, or a channel to flash the SuperB.
   SerialUSB.begin(115200);
@@ -573,13 +639,6 @@ void setup() {
   initAllMsgs();
   LOG_D("Buffer initialization done");
 
-  // Initialize the SD card interface for data logging. If a card is not present, or
-  // not formatted correctly, the feature is disabled. We'll only create the file once
-  // we receive the first timestamp from the car's can bus.
-  if (SD.Init()) {
-    dataLoggingEnabled = true;
-  }
-
   // Turn on the red idle light to indicate we're good to go
   setStateLedStatus(LED_IDLE);
 }
@@ -609,6 +668,12 @@ void loop() {
 // Main MODE_RUN loop. SuperB is updated to check for commands and notifications,
 // and the leds are adjusted based on the state.
 void runModeLoop() {
+
+  // an sd card may be inserted or removed at any time, so we'll check it's state
+  // in the main loop
+  updateDataLoggingState();
+
+  // update the superb interface and poll for can messages on both buses
   SuperB.update();
   uint32_t now = millis();
   uint8_t vehState = pollCanBus(VehCan, VEH_BUS, now);
