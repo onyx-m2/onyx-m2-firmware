@@ -18,13 +18,20 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 ## Flashing the M2
 
 ### Step 1
-Follow the instructions from Macchina to setup your Arduino environment if that's not done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
+Follow the instructions from Macchina to setup your Arduino environment if that's not 
+done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
+
+*NOTE*
+> If you're using VSCode (and you might want to consider doing this if you're not,
+it works really well), you'll want to remove the excessive logging during verification.
+See https://github.com/microsoft/vscode-arduino/issues/891#issuecomment-546750621 for
+details on how to do this.
 
 ### Step 2
-The firmware uses extra settings from the Arduino environment that aren't in the Macchina instructions, in
-particular, for logging. You can set the logging levels desired in the board config menu (much like with the
-esp32 does out of the box). To set this up, add the following lines to the `boards.txt` file for the `sam`
-hardware, just after the entries for `m2`:
+The firmware uses extra settings from the Arduino environment that aren't in the Macchina instructions, in particular, for logging. You can set the logging levels desired in the 
+board config menu (much like with the esp32 does out of the box). To set this up, add 
+the following lines to the `boards.txt` file for the `sam` hardware, just after the 
+entries for `m2`:
 
 ```
 menu.DebugLevel=Core Debug Level
@@ -48,6 +55,23 @@ Next find the line in the same file that starts with `m2.build.extra_flags`, and
 As of this writing, the entire line should read:
 ```
 m2.build.extra_flags=-D__SAM3X8E__ -mthumb {build.usb_flags} -DCORE_DEBUG_LEVEL={build.code_debug}
+```
+
+Restart VSCode or the Arduino IDE before proceeding from here.
+
+### Step 2.1
+
+The default SD library that comes with the M2 has debugging turned on by default. Macchina's
+documentation suggests you should change `#define SD_DEBUG true` in `Arduino_Due_SD_HSMCI.h`
+to `false`, but I suggest you wire up the new logging system. This allows you to control
+SD debug logging using the board configuration screen.
+
+```
+#if CORE_DEBUG_LEVEL > 0
+	#define SD_DEBUG true
+#else
+	#define SD_DEBUG false
+#endif
 ```
 
 ### Step 3
