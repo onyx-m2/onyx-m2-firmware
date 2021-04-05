@@ -18,7 +18,7 @@ The device must be flashed in 2 steps (because it is in fact 2 separate devices 
 ## Flashing the M2
 
 ### Step 1
-Follow the instructions from Macchina to setup your Arduino environment if that's not 
+Follow the instructions from Macchina to setup your Arduino environment if that's not
 done yet. See https://docs.macchina.cc/m2-docs/arduino for details.
 
 *NOTE*
@@ -28,10 +28,12 @@ See https://github.com/microsoft/vscode-arduino/issues/891#issuecomment-54675062
 details on how to do this.
 
 ### Step 2
-The firmware uses extra settings from the Arduino environment that aren't in the Macchina instructions, in particular, for logging. You can set the logging levels desired in the 
-board config menu (much like with the esp32 does out of the box). To set this up, add 
-the following lines to the `boards.txt` file for the `sam` hardware, just after the 
-entries for `m2`:
+The firmware uses extra settings from the Arduino environment that aren't in the Macchina
+instructions, in particular, for logging. You can set the logging levels desired in the
+board config menu (much like with the esp32 does out of the box). To set this up, add
+the following lines to the `boards.txt` file for the `sam` hardware (typically in
+`C:\Users\<username>\AppData\Local\Arduino15\packages\macchina\hardware\sam\version>`),
+just after the entries for `m2`:
 
 ```
 menu.DebugLevel=Core Debug Level
@@ -64,7 +66,8 @@ Restart VSCode or the Arduino IDE before proceeding from here.
 The default SD library that comes with the M2 has debugging turned on by default. Macchina's
 documentation suggests you should change `#define SD_DEBUG true` in `Arduino_Due_SD_HSMCI.h`
 to `false`, but I suggest you wire up the new logging system. This allows you to control
-SD debug logging using the board configuration screen.
+SD debug logging using the board configuration screen. (File should be in
+`C:\Users\<username>\AppData\Local\Arduino15\packages\macchina\hardware\sam\<version>\libraries\M2_SD_HSMCI\src`.)
 
 ```
 #if CORE_DEBUG_LEVEL > 0
@@ -75,7 +78,20 @@ SD debug logging using the board configuration screen.
 ```
 
 ### Step 3
-Flash the M2 sketch [onyx-m2.ino](onyx-m2/onyx-m2.ino) onto to the M2.
+
+Install the extra Arduino libraries required by the firmware. The easiest way to do this
+is to use the Arduino IDE, by selecting `Tools > Manage Libraries...` and searching for
+them by name.
+
+These required libraries are:
+  - ArduinoWebsockets by Gil Maimon: https://github.com/gilmaimon/ArduinoWebsockets
+  - PacketSerial by Christopher Baker: https://github.com/bakercp/PacketSerial
+  - BitReader by Antoine Beauchamp: https://github.com/end2endzone/BitReader
+
+At this point the firmware should build if you run `Arduino Verify`.
+
+### Step 4
+Flash (Upload) the M2 sketch [onyx-m2.ino](onyx-m2/onyx-m2.ino) onto to the M2.
 
 The device should restart on its own. At this point, the M2 is in `run` mode, but the SuperB is not operational yet.
 
