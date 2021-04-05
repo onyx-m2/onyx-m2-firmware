@@ -312,7 +312,7 @@ struct CanMsg {
       if (multiplexor < 2) {
         if (memcmp(values, lastSwitchStatusValues[multiplexor], length) != 0) {
           memcpy(lastSwitchStatusValues[multiplexor], values, length);
-          return true;
+          return has(CAN_MSG_FLAG_TRANSMIT);
         } else {
           return false;
         }
@@ -326,7 +326,7 @@ struct CanMsg {
       bits.read(5, &rightStalkValues);
       if (rightStalkValues != lastRightStalkValues) {
         lastRightStalkValues = rightStalkValues;
-        return true;
+        return has(CAN_MSG_FLAG_TRANSMIT);
       } else {
         return false;
       }
@@ -339,7 +339,7 @@ struct CanMsg {
       bits.read(8, &leftStalkValues);
       if (leftStalkValues != lastLeftStalkValues) {
         lastLeftStalkValues = leftStalkValues;
-        return true;
+        return has(CAN_MSG_FLAG_TRANSMIT);
       } else {
         return false;
       }
@@ -420,7 +420,7 @@ void updateDataLoggingFilename(const char* prefix) {
     BMS_CHARGE_STATUS chargeStatus = getChargeStatus();
     if (gear == DI_GEAR_DRIVE || gear == DI_GEAR_REVERSE || gear == DI_GEAR_NEUTRAL) {
       newFilePrefix = DATALOGGING_FILE_DRIVING_PREFIX;
-    } else if (chargeStatus != BMS_CHARGE_DISCONNECTED) {
+    } else if (chargeStatus != BMS_CHARGE_DISCONNECTED && chargeStatus != BMS_CHARGE_NO_POWER) {
       newFilePrefix = DATALOGGING_FILE_CHARGING_PREFIX;
     } else {
       newFilePrefix = DATALOGGING_FILE_PARKING_PREFIX;
@@ -701,6 +701,7 @@ uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
     uint8_t minutes = values[5];
     char filename[64];
     sprintf(filename, "%s-%d-%d-%dT%d-%d-%d.dat", dataLoggingFilePrefix, year, month, day, hour, minutes, seconds);
+    LOG_I("Creating new logging file: %s", filename);
     if (FS.CreateNew(DATALOGGING_DIRECTORY, filename)) {
       dataLoggingFileCreated = true;
       dataLoggingLastFlushMillis = now;
