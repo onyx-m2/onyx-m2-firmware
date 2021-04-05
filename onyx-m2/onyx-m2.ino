@@ -6,10 +6,22 @@
 // Firmware for Macchina M2
 // https://github.com/onyx-m2/onyx-m2-firmware
 
+//FIXME: Deal with multiplexed messages better; the rate limiting breaks them, and
+//       modification checks fail. One idea is to consider each "index" a different
+//       message and store/transmit as such. Difficulty is knowing which messages
+//       are multiplexed and needing to parse the payload to figure out the "index".
+//       There could be a complete table stored here with parsing info, or the client
+//       could be responsible for specifying this in the CMD request. This would mean
+//       that dbc changes could happen without reflashing the firmware, but poses the
+//       problem that we don't know until someone asks for the message.
+
 #include <variant.h>
 #include <due_can.h>
 #include <Arduino_Due_SD_HSMCI.h>
 #include <PacketSerial.h>
+#include <bitreader.h>
+
+#include "dbc.h"
 
 // Logging is now controlled by the built in "core debug level", and means you
 // can control it from the Arduino menu (or vscode board config panel). If you don't
@@ -66,7 +78,9 @@ PacketSerial Mock;
 
 // FS allows access to the SD card for data logging.
 #define DATALOGGING_DIRECTORY "logs"
-#define DATALOGGING_FILE_PREFIX "canmsgs"
+#define DATALOGGING_FILE_DRIVING_PREFIX "drive"
+#define DATALOGGING_FILE_CHARGING_PREFIX "charge"
+#define DATALOGGING_FILE_PARKING_PREFIX "park"
 #define DATALOGGING_FLUSH_INTERVAL 1000
 FileStore FS;
 
@@ -109,6 +123,13 @@ FileStore FS;
 // Flags this message for real time OTA transmission even if its value is unmodified
 #define CAN_MSG_FLAG_TRANSMIT_UNMODIFIED 0x02
 
+// Flags this message to transmit at full resolution (ignoring rate limiting)
+#define CAN_MSG_FLAG_FULL_RESOLUTION 0x04
+
+// Flags this message to ignore counter and checksum values when determining if a
+// message's value has changed
+#define CAN_MSG_FLAG_IGNORE_COUNTERS 0x08
+
 // SuperB interface
 // This allows the SuperB to relay commands from apps and send notifications to the M2
 // The format is <u8:id, u8:len, u8[len]:data>.
@@ -143,10 +164,29 @@ FileStore FS;
 #define SUPERB_LENGTH_OFFSET 2
 #define SUPERB_DATA_OFFSET 3
 
-// Message ids
-#define MSGID_SYSTEM_TIME 792
-#define MSGID_UNIX_TIME 1320
-#define MSGID_VIN_INFO 1029
+// Signals
+// These are Tesla Model 3 specific signals that are needed for special processing
+// (most processing should happen downstream, bvt some things need to be optimized here)
+
+// VAL_ 280 DI_gear 0 "INVALID" 1 "P" 2 "R" 3 "N" 4 "D" 7 "SNA";
+enum DI_GEAR {
+  DI_GEAR_INVALID = 0,
+  DI_GEAR_PARK = 1,
+  DI_GEAR_REVERSE = 2,
+  DI_GEAR_NEUTRAL = 3,
+  DI_GEAR_DRIVE = 4,
+  DI_GEAR_SNA = 7
+};
+
+// VAL_ 530 BMS_uiChargeStatus 0 "DISCONNECTED" 1 "NO_POWER" 2 "ABOUT_TO_CHARGE" 3 "CHARGING" 4 "CHARGE_COMPLETE" 5 "CHARGE_STOPPED";
+enum BMS_CHARGE_STATUS {
+  BMS_CHARGE_DISCONNECTED = 0,
+  BMS_CHARGE_NO_POWER = 1,
+  BMS_ABOUT_TO_CHARGE = 2,
+  BMS_CHARGING = 3,
+  BMS_CHARGE_COMPLETE = 4,
+  BMS_CHARGE_STOPPED = 5
+};
 
 // LED colours
 // When powered, the red led is, flashing the version number at startup.
@@ -171,6 +211,14 @@ FileStore FS;
 // How fast can an led change colour
 #define LEDCFG_CHANGE_INTERVAL 1000
 
+uint8_t findMsgMultiplexCount(uint8_t bus, uint16_t id);
+
+// Last known input values (requires special processing to ensure no button press is
+// lost to rate limiting)
+uint8_t lastSwitchStatusValues[2][CAN_MSG_MAX_LENGTH];
+uint8_t lastLeftStalkValues;
+uint8_t lastRightStalkValues;
+
 // Firmware buffers
 // The message flags buffer hold the current flag values for all messages.
 // The message buffer holds all incoming frames from the Tesla. This ends up being
@@ -183,6 +231,8 @@ struct CanMsg {
   uint8_t bus;
   uint8_t flags;
   uint8_t length;
+  //uint8_t multiplexTransmitNext;
+  //uint8_t multiplexCount;
   uint8_t transmitInterval;
   uint8_t values[CAN_MSG_MAX_LENGTH];
   uint8_t transmitValues[CAN_MSG_MAX_LENGTH];
@@ -194,9 +244,19 @@ struct CanMsg {
     bus(_bus),
     flags(0),
     length(0),
+    //multiplexTransmitNext(0),
+    //multiplexCount(0),
     transmitInterval(CAN_MSG_DEFAULT_TRANSMIT_INTERVAL) {
       memset(values, 0, sizeof(values));
       memset(transmitValues, 0, sizeof(transmitValues));
+      // multiplexCount = findMsgMultiplexCount(_bus, _id);
+      // if (multiplexCount) {
+      //   values = new uint8_t[multiplexCount * CAN_MSG_MAX_LENGTH];
+      //   transmitValues = new uint8_t[multiplexCount * CAN_MSG_MAX_LENGTH];
+      // } else {
+      //  values = new uint8_t[CAN_MSG_MAX_LENGTH];
+      //  transmitValues = new uint8_t[CAN_MSG_MAX_LENGTH];
+      //}
   }
 
   bool has(uint8_t flag) {
@@ -206,7 +266,12 @@ struct CanMsg {
   void update(CAN_FRAME frame, uint32_t now) {
     timestamp = now;
     length = frame.length;
+    // if (multiplexCount) {
+    //   int index = frame.data.bytes[0] & (multiplexCount - 1);
+    //   memcpy(&values[index * CAN_MSG_MAX_LENGTH], frame.data.bytes, length);
+    // } else {
     memcpy(values, frame.data.bytes, length);
+    //}
   }
 
   void pack(uint8_t* buf, uint8_t* size) {
@@ -221,7 +286,7 @@ struct CanMsg {
     // super annoying bug with unix time being big endian while everything else
     // is little endian; let's not slow down regular processing and just have
     // explicit copy statements for unix time
-    if (id == MSGID_UNIX_TIME) {
+    if (id == MSG_UTC_UNIXTIME_ID) {
       buf[0] = values[3];
       buf[1] = values[2];
       buf[2] = values[1];
@@ -234,9 +299,57 @@ struct CanMsg {
   }
 
   bool transmit(uint32_t now) {
+
+    // check for input messages; these are special because any dropped state changes
+    // could (and do in practice) mean that entire button presses are missed by clients;
+    // these 3 nessages contain all of the hardware controls, the masks remove "noise"
+    // like counters and checksums
+    if (id == MSG_VCLEFT_SWITCHSTATUS_ID) {
+      BitAddress bits;
+      bits.setBuffer(values);
+      int multiplexor = 0;
+      bits.read(2, &multiplexor);
+      if (multiplexor < 2) {
+        if (memcmp(values, lastSwitchStatusValues[multiplexor], length) != 0) {
+          memcpy(lastSwitchStatusValues[multiplexor], values, length);
+          return has(CAN_MSG_FLAG_TRANSMIT);
+        } else {
+          return false;
+        }
+      }
+    }
+    if (id == MSG_SCCM_RIGHTSTALK_ID) {
+      BitAddress bits;
+      bits.setBuffer(values);
+      bits.add(12);
+      int rightStalkValues = 0;
+      bits.read(5, &rightStalkValues);
+      if (rightStalkValues != lastRightStalkValues) {
+        lastRightStalkValues = rightStalkValues;
+        return has(CAN_MSG_FLAG_TRANSMIT);
+      } else {
+        return false;
+      }
+    }
+    if (id == MSG_SCCM_LEFTSTALK_ID) {
+      BitAddress bits;
+      bits.setBuffer(values);
+      bits.add(12);
+      int leftStalkValues = 0;
+      bits.read(8, &leftStalkValues);
+      if (leftStalkValues != lastLeftStalkValues) {
+        lastLeftStalkValues = leftStalkValues;
+        return has(CAN_MSG_FLAG_TRANSMIT);
+      } else {
+        return false;
+      }
+    }
+
     // check transmission inteval
-    if (now - transmitTimestamp < transmitInterval) {
-      return false;
+    if (!has(CAN_MSG_FLAG_FULL_RESOLUTION)) {
+      if (now - transmitTimestamp < transmitInterval) {
+        return false;
+      }
     }
     // check for transmission flags: if "transmit unmodified" is set, msg goes; if
     // "transmit" is set, check that the values have changed
@@ -274,7 +387,53 @@ bool dataLoggingEnabled = false;
 bool dataLoggingCardInserted = false;
 bool dataLoggingFileCreated = false;
 char dataLoggingFilePrefix[16];
+bool dataLoggingCustomFilePrefix = false;
 uint32_t dataLoggingLastFlushMillis = 0;
+
+// Multiplexed messages
+// To deal with these, we unfortunately need apriori knowledge of the message ids and
+// the number of bits holding the "index" to be able to demux them properly. This means
+// that potentially changes to a DBC now mean a new firmware needs to flashed (previous
+// versions were not dependent on any given message id assignment). Note that the rate
+// limiting means that any message with a period greater than 250ms doesn't need to
+// be in this list and will "just work".
+// See `dbc.h` for msg values generated from the DBC file.
+uint8_t findMsgMultiplexCount(uint8_t bus, uint16_t id) {
+  for (int i = 0; MSG_MULTIPLEX_INFO[i][MSG_MULTIPLEX_BUS_OFFSET] != -1 ; i++) {
+    int* info = MSG_MULTIPLEX_INFO[i];
+    if (info[MSG_MULTIPLEX_BUS_OFFSET] == bus && info[MSG_MULTIPLEX_ID_OFFSET] == id) {
+      return info[MSG_MULTIPLEX_COUNT_OFFSET];
+    }
+  }
+  return 0;
+}
+
+// Update the data log filename and close the current data file if it
+// exists and the filename has changed.
+void updateDataLoggingFilename(const char* prefix) {
+  const char* newFilePrefix = dataLoggingFilePrefix;
+  if (prefix != NULL) {
+    newFilePrefix = prefix;
+  }
+  else if (!dataLoggingCustomFilePrefix) {
+    DI_GEAR gear = getGear();
+    BMS_CHARGE_STATUS chargeStatus = getChargeStatus();
+    if (gear == DI_GEAR_DRIVE || gear == DI_GEAR_REVERSE || gear == DI_GEAR_NEUTRAL) {
+      newFilePrefix = DATALOGGING_FILE_DRIVING_PREFIX;
+    } else if (chargeStatus != BMS_CHARGE_DISCONNECTED && chargeStatus != BMS_CHARGE_NO_POWER) {
+      newFilePrefix = DATALOGGING_FILE_CHARGING_PREFIX;
+    } else {
+      newFilePrefix = DATALOGGING_FILE_PARKING_PREFIX;
+    }
+  }
+  if (strcmp(newFilePrefix, dataLoggingFilePrefix)) {
+    strcpy(dataLoggingFilePrefix, newFilePrefix);
+    if (dataLoggingFileCreated) {
+      FS.Close();
+      dataLoggingFileCreated = false;
+    }
+  }
+}
 
 // Update the state of the data logging facility by detecting whether a card was
 // newly insterted or removed. Intended to be called from the main loop.
@@ -308,6 +467,26 @@ void updateDataLoggingState() {
       dataLoggingEnabled = false;
     }
   }
+}
+
+// Get the currently selected gear.
+DI_GEAR getGear() {
+  CanMsg* msg = canMsgs[MSG_DI_SYSTEMSTATUS_BUS][MSG_DI_SYSTEMSTATUS_ID];
+  if (msg != NULL && msg->timestamp != 0) {
+    // SG_ DI_gear: 21|3@1+ (1,0) [0|0] "" X
+    return (DI_GEAR) (msg->values[2] >> 5);
+  }
+  return DI_GEAR_SNA;
+}
+
+// Get the current charge status.
+BMS_CHARGE_STATUS getChargeStatus() {
+  CanMsg* msg = canMsgs[MSG_BMS_STATUS_BUS][MSG_BMS_STATUS_ID];
+  if (msg != NULL && msg->timestamp != 0) {
+    // SG_ BMS_uiChargeStatus: 32|3@1+ (1,0) [0|0] "" X
+    return (BMS_CHARGE_STATUS) (msg->values[4] & 0x7);
+  }
+  return BMS_CHARGE_DISCONNECTED;
 }
 
 // Initialize can message array.
@@ -422,21 +601,15 @@ void onSuperBCommand(uint8_t id, const uint8_t* data) {
     case CMDID_START_LOGGING_TO_CUSTOM_FILE: {
       const char* prefix = reinterpret_cast<const char*>(data);
       LOG_D("CMDID_START_LOGGING_TO_CUSTOM_FILE, prefix: %s", prefix);
-      if (dataLoggingFileCreated) {
-        FS.Close();
-        dataLoggingFileCreated = false;
-      }
-      strcpy(dataLoggingFilePrefix, prefix);
+      dataLoggingCustomFilePrefix = true;
+      updateDataLoggingFilename(prefix);
       break;
     }
 
     case CMDID_STOP_LOGGING_TO_CUSTOM_FILE: {
       LOG_D("CMDID_STOP_LOGGING_TO_CUSTOM_FILE");
-      if (dataLoggingFileCreated) {
-        FS.Close();
-        dataLoggingFileCreated = false;
-      }
-      strcpy(dataLoggingFilePrefix, DATALOGGING_FILE_PREFIX);
+      dataLoggingCustomFilePrefix = false;
+      updateDataLoggingFilename(NULL);
       break;
     }
 
@@ -512,13 +685,13 @@ uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
   uint8_t length = frame.length;
 
   // throw away any VIN info messages (privacy reasons)
-  if (id == MSGID_VIN_INFO) {
+  if (id == MSG_VIN_INFO_ID) {
     return STATE_PASSIVE;
   }
 
   // if we haven't initialized the data logging file and logging is enabled, and
   // this is the time msg, create a file using the timestamp as part of the filename
-  if (dataLoggingEnabled && !dataLoggingFileCreated && id == MSGID_SYSTEM_TIME) {
+  if (dataLoggingEnabled && !dataLoggingFileCreated && id == MSG_UTC_SYSTEMTIME_ID) {
     uint8_t* values = frame.data.bytes;
     uint8_t year = values[0];
     uint8_t month = values[1];
@@ -528,6 +701,7 @@ uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
     uint8_t minutes = values[5];
     char filename[64];
     sprintf(filename, "%s-%d-%d-%dT%d-%d-%d.dat", dataLoggingFilePrefix, year, month, day, hour, minutes, seconds);
+    LOG_I("Creating new logging file: %s", filename);
     if (FS.CreateNew(DATALOGGING_DIRECTORY, filename)) {
       dataLoggingFileCreated = true;
       dataLoggingLastFlushMillis = now;
@@ -601,7 +775,8 @@ void setup() {
 
   // SD card
   pinMode(SD_SW, INPUT);
-  strcpy(dataLoggingFilePrefix, DATALOGGING_FILE_PREFIX);
+  dataLoggingFilePrefix[0] = NULL;
+  updateDataLoggingFilename(NULL);
 
   // The USB port is used either as a mock interface that allows direct injection of
   // CAN message on the M2, or a channel to flash the SuperB.
@@ -717,6 +892,7 @@ void runModeLoop() {
       (now - dataLoggingLastFlushMillis > DATALOGGING_FLUSH_INTERVAL)) {
     FS.Flush();
     dataLoggingLastFlushMillis = now;
+    updateDataLoggingFilename(NULL);
   }
 }
 
