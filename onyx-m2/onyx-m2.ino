@@ -762,9 +762,6 @@ void setStateLedStatus(uint32_t led) {
   }
 }
 
-// buffer that receives keystrokes from interactive mode
-char interactiveCommandBuffer[64];
-
 // Main controller setup. Initialize the led we'll be using for activity,
 // the BleLink and Tesla interfaces, and our internal buffers.
 void setup() {
@@ -798,24 +795,6 @@ void setup() {
   Mock.setStream(&SerialUSB);
   Mock.setPacketHandler(&onMock);
   LOG_D("USB setup done");
-
-  usbprintf(" ---------------------------------------------");
-  usbprintf("| O N Y X  M 2                                ");
-  usbprintf("|                                             ");
-  usbprintf("| https://github.com/onyx-m2/onyx-m2-firmware ");
-  usbprintf("| Revision 8095668                            ");
-  usbprintf("| %s", __DATE__);
-  usbprintf(" ---------------------------------------------");
-
-  usbprintf("| COMMANDS");
-  usbprintf("| reset: reset the M2 device");
-  usbprintf("| suberb: switch to superb flashing mode");
-  usbprintf("| allmsgflags <flags[hex]>: set all message flags to <value>");
-  usbprintf("| msgflags <bus> <id> <flags[hex]>: set the flags of message <id> on <bus> to <flags>");
-  usbprintf("| msg <bus> <id>: return the current value of the <id> message on <bus>");
-  usbprintf("| startlog <prefix>: start logging to a custom file using <prefix>");
-  usbprintf("| stoplog: stop logging to custom file");
-  memset(interactiveCommandBuffer, 0, sizeof(interactiveCommandBuffer));
 
   // Configure SuperB pins for intiaiting programming
   pinMode(XBEE_RST, OUTPUT);
@@ -852,16 +831,8 @@ void setup() {
 // to MODE_SUPERB), and the appropriate mode handler is dispatched.
 void loop() {
 
-  // check for a usb connection, and run the interactive mode is present
-  if (SerialUSB) {
-    runInteractiveLoop();
-  }
-
   if (mode == MODE_RUN) {
     runModeLoop();
-
-    // TODO: enter superb mode if a specific key is entered by usb, and allow the
-    // "drop into boot mode" to be triggered by usb keyboard
 
     if (digitalRead(Button1) == LOW || digitalRead(Button2) == LOW) {
       mode = MODE_SUPERB;
@@ -881,6 +852,11 @@ void loop() {
 // Main MODE_RUN loop. SuperB is updated to check for commands and notifications,
 // and the leds are adjusted based on the state.
 void runModeLoop() {
+
+  // check for a usb connection, and run the interactive mode is present
+  if (SerialUSB) {
+    runInteractiveLoop();
+  }
 
   // an sd card may be inserted or removed at any time, so we'll check it's state
   // in the main loop
@@ -972,24 +948,52 @@ void superbModeLoop() {
   }
 }
 
+char commandBuffer[64];
+bool firstConnection = true;
+
 void runInteractiveLoop() {
+
+  if (SerialUSB && firstConnection) {
+    firstConnection = false;
+
+    usbprintf(" ---------------------------------------------");
+    usbprintf("| O N Y X  M 2                                ");
+    usbprintf("|                                             ");
+    usbprintf("| https://github.com/onyx-m2/onyx-m2-firmware ");
+    usbprintf("| Revision 8095668                            ");
+    usbprintf("| %s", __DATE__);
+    usbprintf(" ---------------------------------------------");
+
+    usbprintf("| COMMANDS");
+    usbprintf("| reset: reset the M2 device");
+    usbprintf("| suberb: switch to superb flashing mode");
+    usbprintf("| allmsgflags <flags[hex]>: set all message flags to <value>");
+    usbprintf("| msgflags <bus> <id> <flags[hex]>: set the flags of message <id> on <bus> to <flags>");
+    usbprintf("| msg <bus> <id>: return the current value of the <id> message on <bus>");
+    usbprintf("| startlog <prefix>: start logging to a custom file using <prefix>");
+    usbprintf("| stoplog: stop logging to custom file");
+    memset(commandBuffer, 0, sizeof(commandBuffer));
+  }
 
   // if someone is typing, save the character to the interactive command buffer, except
   // if the character is the newline, in which case, parse and execute the command
   if (SerialUSB.available() > 0) {
     char c = SerialUSB.read();
     if (c != '\n') {
-      strncat(interactiveCommandBuffer, &c, 1);
+      strncat(commandBuffer, &c, 1);
       return;
     }
 
-    const char* command = strtok(interactiveCommandBuffer, " ");
+    const char* command = strtok(commandBuffer, " ");
     if (strcmp(command, "reset") == 0) {
       // reset M2
       rstc_start_software_reset(RSTC);
     }
     else if (strcmp(command, "superb") == 0) {
       // initiate superb flash mode
+      mode = MODE_SUPERB;
+      usbprintf("Initiating SuperB bootloader in 10 seconds - start flashing superb now");
+      delay(10000);
       digitalWrite(XBEE_MULT4, LOW);
       delay(500);
       digitalWrite(XBEE_RST, LOW);
@@ -997,7 +1001,6 @@ void runInteractiveLoop() {
       digitalWrite(XBEE_RST, HIGH);
       delay(500);
       digitalWrite(XBEE_MULT4, HIGH);
-
     }
     else if (strcmp(command, "allmsgflags") == 0) {
       // allmsgflags <flags[hex]>: set all message flags to <value>
@@ -1065,6 +1068,6 @@ void runInteractiveLoop() {
     else {
       usbprintf("Unknown command: %s", command);
     }
-    memset(interactiveCommandBuffer, 0, sizeof(interactiveCommandBuffer));
+    memset(commandBuffer, 0, sizeof(commandBuffer));
   }
 }
