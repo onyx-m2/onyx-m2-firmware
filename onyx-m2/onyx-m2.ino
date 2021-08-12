@@ -302,7 +302,7 @@ struct CanMsg {
 
     // check for input messages; these are special because any dropped state changes
     // could (and do in practice) mean that entire button presses are missed by clients;
-    // these 3 nessages contain all of the hardware controls, the masks remove "noise"
+    // these 3 messages contain all of the hardware controls, the masks remove "noise"
     // like counters and checksums
     if (id == MSG_VCLEFT_SWITCHSTATUS_ID) {
       BitAddress bits;
@@ -389,6 +389,17 @@ bool dataLoggingFileCreated = false;
 char dataLoggingFilePrefix[16];
 bool dataLoggingCustomFilePrefix = false;
 uint32_t dataLoggingLastFlushMillis = 0;
+
+void usbprintf(const char* fmt, ...) {
+  char buffer[256];
+  va_list args;
+  if (SerialUSB) {
+    va_start(args, fmt);
+    vsprintf(buffer, fmt, args);
+    SerialUSB.println(buffer);
+    va_end(args);
+  }
+}
 
 // Multiplexed messages
 // To deal with these, we unfortunately need apriori knowledge of the message ids and
@@ -751,6 +762,9 @@ void setStateLedStatus(uint32_t led) {
   }
 }
 
+// buffer that receives keystrokes from interactive mode
+char interactiveCommandBuffer[64];
+
 // Main controller setup. Initialize the led we'll be using for activity,
 // the BleLink and Tesla interfaces, and our internal buffers.
 void setup() {
@@ -785,13 +799,29 @@ void setup() {
   Mock.setPacketHandler(&onMock);
   LOG_D("USB setup done");
 
-  PRINT(" ---------------------------------------------");
-  PRINT("| O N Y X  M 2                                ");
-  PRINT("|                                             ");
-  PRINT("| https://github.com/onyx-m2/onyx-m2-firmware ");
-  PRINT("| Revision 8095668                            ");
-  PRINT("| %s", __DATE__);
-  PRINT(" ---------------------------------------------");
+  usbprintf(" ---------------------------------------------");
+  usbprintf("| O N Y X  M 2                                ");
+  usbprintf("|                                             ");
+  usbprintf("| https://github.com/onyx-m2/onyx-m2-firmware ");
+  usbprintf("| Revision 8095668                            ");
+  usbprintf("| %s", __DATE__);
+  usbprintf(" ---------------------------------------------");
+
+  usbprintf("| COMMANDS");
+  usbprintf("| reset: reset the M2 device");
+  usbprintf("| suberb: switch to superb flashing mode");
+  usbprintf("| allmsgflags <flags[hex]>: set all message flags to <value>");
+  usbprintf("| msgflags <bus> <id> <flags[hex]>: set the flags of message <id> on <bus> to <flags>");
+  usbprintf("| msg <bus> <id>: return the current value of the <id> message on <bus>");
+  usbprintf("| startlog <prefix>: start logging to a custom file using <prefix>");
+  usbprintf("| stoplog: stop logging to custom file");
+  memset(interactiveCommandBuffer, 0, sizeof(interactiveCommandBuffer));
+
+  // Configure SuperB pins for intiaiting programming
+  pinMode(XBEE_RST, OUTPUT);
+  digitalWrite(XBEE_RST, HIGH);
+  pinMode(XBEE_MULT4, OUTPUT);
+  digitalWrite(XBEE_MULT4, HIGH);
 
   // SuperB is reached through the Xbee serial interface, which uses COBS encoding
   Xbee.begin(115200);
@@ -821,14 +851,22 @@ void setup() {
 // Main controller loop. The buttons are checked (any press causes the mode to switch
 // to MODE_SUPERB), and the appropriate mode handler is dispatched.
 void loop() {
+
+  // check for a usb connection, and run the interactive mode is present
+  if (SerialUSB) {
+    runInteractiveLoop();
+  }
+
   if (mode == MODE_RUN) {
     runModeLoop();
+
+    // TODO: enter superb mode if a specific key is entered by usb, and allow the
+    // "drop into boot mode" to be triggered by usb keyboard
+
     if (digitalRead(Button1) == LOW || digitalRead(Button2) == LOW) {
       mode = MODE_SUPERB;
       PRINT("Entering SuperB mode");
       PRINT("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
-      pinMode(XBEE_RST, OUTPUT);
-      pinMode(XBEE_MULT4, OUTPUT);
       digitalWrite(LED_IDLE, HIGH);
       digitalWrite(LED_BLE_CONNECTED, HIGH);
       digitalWrite(LED_WS_UP, HIGH);
@@ -931,5 +969,102 @@ void superbModeLoop() {
     lastLedChangeMillis = now;
     idleLedState = (idleLedState == HIGH) ? LOW : HIGH;
     digitalWrite(LED_IDLE, idleLedState);
+  }
+}
+
+void runInteractiveLoop() {
+
+  // if someone is typing, save the character to the interactive command buffer, except
+  // if the character is the newline, in which case, parse and execute the command
+  if (SerialUSB.available() > 0) {
+    char c = SerialUSB.read();
+    if (c != '\n') {
+      strncat(interactiveCommandBuffer, &c, 1);
+      return;
+    }
+
+    const char* command = strtok(interactiveCommandBuffer, " ");
+    if (strcmp(command, "reset") == 0) {
+      // reset M2
+      rstc_start_software_reset(RSTC);
+    }
+    else if (strcmp(command, "superb") == 0) {
+      // initiate superb flash mode
+      digitalWrite(XBEE_MULT4, LOW);
+      delay(500);
+      digitalWrite(XBEE_RST, LOW);
+      delay(500);
+      digitalWrite(XBEE_RST, HIGH);
+      delay(500);
+      digitalWrite(XBEE_MULT4, HIGH);
+
+    }
+    else if (strcmp(command, "allmsgflags") == 0) {
+      // allmsgflags <flags[hex]>: set all message flags to <value>
+      const char* flagsText = strtok(NULL, " ");
+      if (flagsText) {
+        int flags = strtol(flagsText, NULL, 16);
+        setAllMsgFlags(flags);
+      }
+      else {
+        usbprintf("Syntax: allflags <flags>");
+      }
+    }
+    else if (strcmp(command, "msgflags") == 0) {
+      // msgflags <bus> <id> <flags[hex]>: set the flags of message <id> on <bus> to <flags>
+      const char* busText = strtok(NULL, " ");
+      const char* idText = strtok(NULL, " ");
+      const char* flagsText = strtok(NULL, " ");
+      if (busText && idText && flagsText) {
+        int bus = strtol(busText, NULL, 10);
+        int id = strtol(idText, NULL, 10);
+        int flags = strtol(flagsText, NULL, 16);
+        setMsgFlags(bus, id, flags);
+      }
+      else {
+        usbprintf("Syntax: msgflags <bus> <id> <flags>");
+      }
+    }
+    else if (strcmp(command, "msg") == 0) {
+      // msg <bus> <id>: return the current value of the <id> message on <bus>
+      const char* busText = strtok(NULL, " ");
+      const char* idText = strtok(NULL, " ");
+      if (busText && idText) {
+        int bus = strtol(busText, NULL, 10);
+        int id = strtol(idText, NULL, 10);
+        CanMsg* msg = createOrGetMsg(bus, id);
+        char values[32];
+        char* buffer = values;
+        for (int i = 0; i < msg->length; i++) {
+          buffer += sprintf(buffer, "%02x ", msg->values[i]);
+        }
+        usbprintf("bus: %i, msg: %d [%x], flags: %x, len: %d, values: %s",
+          bus, id, id, msg->flags, msg->length, values);
+      }
+      else {
+        usbprintf("Syntax: msg <bus> <id>");
+      }
+    }
+    else if (strcmp(command, "startlog") == 0) {
+      // startlog <prefix>: start logging to a custom file using <prefix>
+      const char* prefix = strtok(NULL, " ");
+      if (prefix) {
+        usbprintf("Starting logging with prefix: %s", prefix);
+        dataLoggingCustomFilePrefix = true;
+        updateDataLoggingFilename(prefix);
+      } else {
+        usbprintf("Syntax: startlog <prefix>");
+      }
+    }
+   else if (strcmp(command, "stoplog") == 0) {
+      // stoplog: stop logging to custom file
+      dataLoggingCustomFilePrefix = false;
+      updateDataLoggingFilename(NULL);
+      usbprintf("Reverted to logging with standard naming convention");
+    }
+    else {
+      usbprintf("Unknown command: %s", command);
+    }
+    memset(interactiveCommandBuffer, 0, sizeof(interactiveCommandBuffer));
   }
 }
