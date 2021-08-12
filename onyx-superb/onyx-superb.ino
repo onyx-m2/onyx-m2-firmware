@@ -291,12 +291,16 @@ class BLECallbacks: public BLEServerCallbacks {
     LOG_I("BLE server's client connected");
     bleConnected = true;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_CONNECTED);
+
+    // restart advertising as soon as a device connects to support multiple
+    // clients connecting (the library turns off advertising on connect by
+    // default but otherwise supports multiple simultaneous clients)
+    BLEDevice::startAdvertising();
   };
   void onDisconnect(BLEServer* pServer) {
     LOG_I("BLE server's client disconnected");
     bleConnected = false;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_DISCONNECTED);
-    BLEDevice::startAdvertising();
   }
 };
 
@@ -391,6 +395,9 @@ void setup() {
     wifiMulti.addAP(NVS.read("MS").c_str(), NVS.read("MP").c_str());
     wifiEnabled = true;
   }
+
+  // undocumented requirement: wifiMulti.run() must be called first in setup() because
+  // the first call is synchronous
 
   WS.onMessage(&onWSMessage);
   WS.onEvent(&onWSEvent);
