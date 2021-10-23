@@ -303,7 +303,13 @@ struct CanMsg {
     // check for input messages; these are special because any dropped state changes
     // could (and do in practice) mean that entire button presses are missed by clients;
     // these 3 nessages contain all of the hardware controls, the masks remove "noise"
-    // like counters and checksums
+    // like counters and checksums;
+    // note: let's ignore the transmit flag for button presses, why? because (a) humans
+    // can't press buttons fast enough for this traffic to matter, and (b) if a client
+    // resets all flags, all other devices loose the ability to receive input; in
+    // practice this is happening when the onscreen interface is closed causing the
+    // instrument cluster to no longer receive button presses (that would allow for a
+    // manual reset button)
     if (id == MSG_VCLEFT_SWITCHSTATUS_ID) {
       BitAddress bits;
       bits.setBuffer(values);
@@ -312,7 +318,7 @@ struct CanMsg {
       if (multiplexor < 2) {
         if (memcmp(values, lastSwitchStatusValues[multiplexor], length) != 0) {
           memcpy(lastSwitchStatusValues[multiplexor], values, length);
-          return has(CAN_MSG_FLAG_TRANSMIT);
+          return true; // intentionally not returning has(CAN_MSG_FLAG_TRANSMIT);
         } else {
           return false;
         }
@@ -326,7 +332,7 @@ struct CanMsg {
       bits.read(5, &rightStalkValues);
       if (rightStalkValues != lastRightStalkValues) {
         lastRightStalkValues = rightStalkValues;
-        return has(CAN_MSG_FLAG_TRANSMIT);
+        return true; // intentionally not returning has(CAN_MSG_FLAG_TRANSMIT);
       } else {
         return false;
       }
@@ -339,7 +345,7 @@ struct CanMsg {
       bits.read(8, &leftStalkValues);
       if (leftStalkValues != lastLeftStalkValues) {
         lastLeftStalkValues = leftStalkValues;
-        return has(CAN_MSG_FLAG_TRANSMIT);
+        return true; // intentionally not returning has(CAN_MSG_FLAG_TRANSMIT);
       } else {
         return false;
       }
