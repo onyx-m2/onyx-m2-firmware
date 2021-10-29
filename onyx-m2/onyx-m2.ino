@@ -826,6 +826,34 @@ void loop() {
       digitalWrite(LED_WS_UP, HIGH);
       digitalWrite(LED_WIFI_UP, HIGH);
     }
+
+    // usb command processing
+    if (SerialUSB.available() > 0) {
+      char c = SerialUSB.read();
+      switch (c) {
+
+        // (r)eset M2
+        case 'r':
+          rstc_start_software_reset(RSTC);
+          break;
+
+        // enter (s)uperb programming mode by switching to MODE_SUPERB
+        // after simulating the button sequence that initiates flashing
+        // on the esp32
+        case 's':
+          mode = MODE_SUPERB;
+          SerialUSB.println("Initiating SuperB bootloader in 10 seconds - start flashing superb now");
+          delay(10000);
+          digitalWrite(XBEE_MULT4, LOW);
+          delay(500);
+          digitalWrite(XBEE_RST, LOW);
+          delay(500);
+          digitalWrite(XBEE_RST, HIGH);
+          delay(500);
+          digitalWrite(XBEE_MULT4, HIGH);
+          break;
+      }
+    }
   }
   else {
     superbModeLoop();
