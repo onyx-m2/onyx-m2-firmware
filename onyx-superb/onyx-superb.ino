@@ -103,7 +103,7 @@ bool wifiEnabled = false;
 bool wifiConnected = false;
 uint32_t wifiLastAttempt = 0;
 
-bool bleConnected = false;
+int bleConnectedClientCount = 0;
 
 #if WANT_WIFI == 1
 
@@ -280,7 +280,7 @@ void onM2(const uint8_t* buffer, size_t size) {
   #if WANT_WIFI == 1
   sent = WS.sendBinary((const char*)buffer, size);
   #endif
-  if (bleConnected && !sent) {
+  if (bleConnectedClientCount > 0 && !sent) {
     pBleMessageCharacteristic->setValue(const_cast<uint8_t*>(buffer), size);
     pBleMessageCharacteristic->notify(true);
   }
@@ -289,7 +289,7 @@ void onM2(const uint8_t* buffer, size_t size) {
 class BLECallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     LOG_I("BLE server's client connected");
-    bleConnected = true;
+    bleConnectedClientCount++;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_CONNECTED);
 
     // restart advertising as soon as a device connects to support multiple
@@ -299,7 +299,7 @@ class BLECallbacks: public BLEServerCallbacks {
   };
   void onDisconnect(BLEServer* pServer) {
     LOG_I("BLE server's client disconnected");
-    bleConnected = false;
+    bleConnectedClientCount--;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_DISCONNECTED);
   }
 };
