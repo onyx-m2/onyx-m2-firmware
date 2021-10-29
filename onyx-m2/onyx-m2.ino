@@ -71,11 +71,6 @@ PacketSerial SuperB;
 #define ChCan Can1
 #define CH_BUS 1
 
-// Mock is a mock device that is enabled when something is connected to the usb port.
-// This can be used to inject can message directly into the M2 for testing. It is
-// designed to be used with the 'bin/onyx-serial-replay' script.
-PacketSerial Mock;
-
 // FS allows access to the SD card for data logging.
 #define DATALOGGING_DIRECTORY "logs"
 #define DATALOGGING_FILE_DRIVING_PREFIX "drive"
@@ -672,11 +667,6 @@ void onSuperBNotification(uint8_t id, const uint8_t* data) {
   }
 }
 
-// Mock interface processing.
-void onMock(const uint8_t* buf, size_t size) {
-  SuperB.send(buf, size);
-}
-
 // Message processing. If the can bus has a message available, we grab it and figure
 // out what to do with it.
 uint8_t pollCanBus(CANRaw& can, uint8_t bus, uint32_t now) {
@@ -784,11 +774,7 @@ void setup() {
   dataLoggingFilePrefix[0] = NULL;
   updateDataLoggingFilename(NULL);
 
-  // The USB port is used either as a mock interface that allows direct injection of
-  // CAN message on the M2, or a channel to flash the SuperB.
   SerialUSB.begin(115200);
-  Mock.setStream(&SerialUSB);
-  Mock.setPacketHandler(&onMock);
   LOG_D("USB setup done");
 
   PRINT(" ---------------------------------------------");
@@ -859,11 +845,6 @@ void runModeLoop() {
   uint32_t now = millis();
   uint8_t vehState = pollCanBus(VehCan, VEH_BUS, now);
   uint8_t chState = pollCanBus(ChCan, CH_BUS, now);
-
-  // update mock interface if usb is connected and no real can messages were received
-  if (vehState == STATE_IDLE && chState == STATE_IDLE) {
-    Mock.update();
-  }
 
   // store the timing of the last active and passive states
   if (vehState == STATE_ACTIVE || chState == STATE_ACTIVE) {
