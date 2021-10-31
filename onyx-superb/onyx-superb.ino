@@ -103,8 +103,6 @@ bool wifiEnabled = false;
 bool wifiConnected = false;
 uint32_t wifiLastAttempt = 0;
 
-int bleConnectedClientCount = 0;
-
 #if WANT_WIFI == 1
 
 WiFiMulti wifiMulti;
@@ -272,24 +270,20 @@ void onWSEvent(WebsocketsEvent event, WSInterfaceString data) {
 #endif // WANT_WIFI
 
 // M2 message callback
-// The M2 will push messages here. Always attempt to send on to the web socket. If that
-// fails, and there's a ble device currently connected, notify it of the new message.
+// The M2 will push messages here. Attempt to send on to the web socket, and notify
+// any connected BLE clients of the message.
 void onM2(const uint8_t* buffer, size_t size) {
   LOG_D("M2 message callback called, size: %d", size);
-  bool sent = false;
   #if WANT_WIFI == 1
-  sent = WS.sendBinary((const char*)buffer, size);
+  WS.sendBinary((const char*)buffer, size);
   #endif
-  if (bleConnectedClientCount > 0 && !sent) {
-    pBleMessageCharacteristic->setValue(const_cast<uint8_t*>(buffer), size);
-    pBleMessageCharacteristic->notify(true);
-  }
+  pBleMessageCharacteristic->setValue(const_cast<uint8_t*>(buffer), size);
+  pBleMessageCharacteristic->notify(true);
 }
 
 class BLECallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
     LOG_I("BLE server's client connected");
-    bleConnectedClientCount++;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_CONNECTED);
 
     // restart advertising as soon as a device connects to support multiple
@@ -299,7 +293,6 @@ class BLECallbacks: public BLEServerCallbacks {
   };
   void onDisconnect(BLEServer* pServer) {
     LOG_I("BLE server's client disconnected");
-    bleConnectedClientCount--;
     sendM2(M2_NOTIFICATION, NOTIFY_BLE_DISCONNECTED);
   }
 };
