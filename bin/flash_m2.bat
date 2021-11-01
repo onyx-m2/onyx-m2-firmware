@@ -1,1 +1,1 @@
-bossac.exe -e -w -v -i -d -b -R onyx-m2.ino.bin
+bossac.exe -p COM6 -a -i -e -w -v -b -R onyx-m2.ino.bin
