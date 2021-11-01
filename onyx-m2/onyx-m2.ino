@@ -816,15 +816,7 @@ void loop() {
   if (mode == MODE_RUN) {
     runModeLoop();
     if (digitalRead(Button1) == LOW || digitalRead(Button2) == LOW) {
-      mode = MODE_SUPERB;
-      PRINT("Entering SuperB mode");
-      PRINT("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
-      pinMode(XBEE_RST, OUTPUT);
-      pinMode(XBEE_MULT4, OUTPUT);
-      digitalWrite(LED_IDLE, HIGH);
-      digitalWrite(LED_BLE_CONNECTED, HIGH);
-      digitalWrite(LED_WS_UP, HIGH);
-      digitalWrite(LED_WIFI_UP, HIGH);
+      enterSuperbMode();
     }
 
     // usb command processing
@@ -834,23 +826,29 @@ void loop() {
 
         // (r)eset M2
         case 'r':
+          SerialUSB.println("Reseting M2");
+          delay(1000);
           rstc_start_software_reset(RSTC);
           break;
 
-        // enter (s)uperb programming mode by switching to MODE_SUPERB
-        // after simulating the button sequence that initiates flashing
-        // on the esp32
-        case 's':
-          mode = MODE_SUPERB;
-          SerialUSB.println("Initiating SuperB bootloader in 10 seconds - start flashing superb now");
-          delay(10000);
+        // (f)lash superb
+        case 'f':
+          SerialUSB.println("Initiating SuperB bootloader for flashing");
+          enterSuperbMode();
+          delay(1000);
           digitalWrite(XBEE_MULT4, LOW);
-          delay(500);
+          delay(100);
           digitalWrite(XBEE_RST, LOW);
-          delay(500);
+          delay(100);
           digitalWrite(XBEE_RST, HIGH);
-          delay(500);
+          delay(100);
           digitalWrite(XBEE_MULT4, HIGH);
+          break;
+
+        // (s)uperb debug mode
+        case 's':
+          SerialUSB.println("Entering SuperB mode, normal operation suspended");
+          enterSuperbMode();
           break;
       }
     }
@@ -909,6 +907,23 @@ void runModeLoop() {
     dataLoggingLastFlushMillis = now;
     updateDataLoggingFilename(NULL);
   }
+}
+
+// Procedure for entering superb mode
+void enterSuperbMode() {
+  PRINT("Entering SuperB mode");
+  PRINT("Hold BTN2 while pressing then releasing BTN1 to enter programming mode");
+  mode = MODE_SUPERB;
+
+  // setup superb "buttons"
+  pinMode(XBEE_RST, OUTPUT);
+  pinMode(XBEE_MULT4, OUTPUT);
+
+  // turn off all the leds (effectively reseting the visual state)
+  digitalWrite(LED_IDLE, HIGH);
+  digitalWrite(LED_BLE_CONNECTED, HIGH);
+  digitalWrite(LED_WS_UP, HIGH);
+  digitalWrite(LED_WIFI_UP, HIGH);
 }
 
 // Main MODE_SUPERB loop. In this mode, the USB port is wired to the SuperB directly so
